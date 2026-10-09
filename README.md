@@ -1,7 +1,7 @@
 # relgeo_mcp
 
-Target repository: `relgeo/mcp`. This workspace directory is the private
-staging package for the MCP contract spike.
+Repository: `relgeo/mcp`. This is the private, non-publishable package
+repository for the MCP contract spike.
 
 Pure-Dart contract package for the RelGeo MCP server and desktop session
 bridge. It deliberately has no Flutter, widget, filesystem, or transport
