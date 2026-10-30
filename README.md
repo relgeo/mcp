@@ -19,9 +19,15 @@ This package currently defines the session/security boundary spike:
   no-autosave defaults.
 - `mcp_schema.dart` defines the typed MVP tool/resource contract, bounded
   inputs, source proposals, validation results, diagnostics, and provenance.
+- `local_dispatch.dart` provides typed seven-tool dispatch, canonical resource
+  list/read, and a transport-independent JSON-RPC router. Owner callbacks are
+  injected so this package does not duplicate `spec/id`, `core`, language
+  service, or renderer semantics.
 
-The package does not select an MCP SDK or transport. That decision belongs to
-the conformance spike described in `docs/plans/11-mcp-agent-integration.md`.
+The package does not select an MCP SDK or socket transport. The router is the
+SDK-neutral boundary; stdio/HTTP framing and host lifecycle remain decisions
+for the conformance spike described in
+`docs/plans/11-mcp-agent-integration.md`.
 
 The transport fixture lives under `tool/`. Run the dependency-free stdio
 round-trip with:

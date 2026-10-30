@@ -582,6 +582,7 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
     outputType: 'FindSyntaxResult',
     inputSchema: <String, Object?>{
       'type': 'object',
+      'additionalProperties': false,
       'required': <String>['query'],
       'properties': <String, Object?>{
         'query': <String, Object?>{'type': 'string', 'minLength': 1},
@@ -603,6 +604,7 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
     outputType: 'SyntaxRuleResult',
     inputSchema: <String, Object?>{
       'type': 'object',
+      'additionalProperties': false,
       'required': <String>['ruleId'],
       'properties': <String, Object?>{
         'ruleId': <String, Object?>{'type': 'string', 'minLength': 1},
@@ -618,6 +620,7 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
     outputType: 'ExamplesResult',
     inputSchema: <String, Object?>{
       'type': 'object',
+      'additionalProperties': false,
       'anyOf': <Object?>[
         <String, Object?>{
           'required': <String>['query'],
@@ -626,6 +629,21 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
           'required': <String>['exampleId'],
         },
       ],
+      'properties': <String, Object?>{
+        'query': <String, Object?>{'type': 'string', 'minLength': 1},
+        'exampleId': <String, Object?>{'type': 'string', 'minLength': 1},
+        'specVersion': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'default': '0.5',
+        },
+        'maxResults': <String, Object?>{
+          'type': 'integer',
+          'minimum': 1,
+          'maximum': 24,
+          'default': 6,
+        },
+      },
     },
   ),
   RelGeoToolContract(
@@ -636,12 +654,23 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
     outputType: 'CompletionResult',
     inputSchema: <String, Object?>{
       'type': 'object',
+      'additionalProperties': false,
       'required': <String>['source', 'position'],
       'properties': <String, Object?>{
         'source': <String, Object?>{'type': 'string'},
         'position': <String, Object?>{
           'type': 'object',
+          'additionalProperties': false,
           'required': <String>['line', 'character'],
+          'properties': <String, Object?>{
+            'line': <String, Object?>{'type': 'integer', 'minimum': 0},
+            'character': <String, Object?>{'type': 'integer', 'minimum': 0},
+          },
+        },
+        'specVersion': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'default': '0.5',
         },
         'maxResults': <String, Object?>{
           'type': 'integer',
@@ -660,6 +689,7 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
     outputType: 'ValidationResult',
     inputSchema: <String, Object?>{
       'type': 'object',
+      'additionalProperties': false,
       'required': <String>['source'],
       'properties': <String, Object?>{
         'source': <String, Object?>{'type': 'string'},
@@ -681,6 +711,7 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
     outputType: 'DiagnosticExplanationResult',
     inputSchema: <String, Object?>{
       'type': 'object',
+      'additionalProperties': false,
       'required': <String>['code'],
       'properties': <String, Object?>{
         'code': <String, Object?>{'type': 'string', 'minLength': 1},
@@ -697,6 +728,7 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
     outputType: 'RenderResult',
     inputSchema: <String, Object?>{
       'type': 'object',
+      'additionalProperties': false,
       'required': <String>['source'],
       'properties': <String, Object?>{
         'source': <String, Object?>{'type': 'string'},
@@ -706,6 +738,11 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
           'default': 'svg',
         },
         'sheetId': <String, Object?>{'type': 'string'},
+        'specVersion': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'default': '0.5',
+        },
       },
     },
   ),

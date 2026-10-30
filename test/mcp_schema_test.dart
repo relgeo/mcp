@@ -110,6 +110,31 @@ void main() {
     expect(relGeoMvpResourceUris, contains('relgeo://spec/rules/{ruleId}'));
   });
 
+  test('advertised schemas match bounded DTO fields', () {
+    final schemas = <String, Map<String, Object?>>{
+      for (final contract in relGeoMvpToolContracts)
+        contract.name: contract.inputSchema,
+    };
+    final examples = schemas['relgeo_get_examples']!;
+    expect(examples['additionalProperties'], isFalse);
+    expect(
+      (examples['properties'] as Map<String, Object?>).keys,
+      containsAll(<String>['query', 'exampleId', 'specVersion', 'maxResults']),
+    );
+    expect(
+      ((schemas['relgeo_complete_source']!['properties']
+              as Map<String, Object?>)['specVersion']
+          as Map<String, Object?>)['minLength'],
+      1,
+    );
+    expect(
+      ((schemas['relgeo_render_source']!['properties']
+              as Map<String, Object?>)['specVersion']
+          as Map<String, Object?>)['default'],
+      '0.5',
+    );
+  });
+
   test('website provenance cannot become normative', () {
     const website = McpProvenance(
       source: McpProvenanceSource.website,

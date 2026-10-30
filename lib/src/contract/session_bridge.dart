@@ -434,3 +434,61 @@ class McpSecurityPolicy {
     return List<String>.unmodifiable(errors);
   }
 }
+
+/// Lifecycle and authorization boundary for one embedded local server.
+///
+/// Flutter owns the user-facing enable/disable control and supplies a policy
+/// with [McpSecurityPolicy.enabled] set explicitly. This class keeps token
+/// lifetime and per-call permission checks inside the pure-Dart boundary.
+class McpServerSession {
+  McpServerSession({
+    McpSecurityPolicy policy = const McpSecurityPolicy(),
+    McpSessionTokenStore? tokens,
+  }) : policy = policy,
+       tokens = tokens ?? McpSessionTokenStore();
+
+  final McpSecurityPolicy policy;
+  final McpSessionTokenStore tokens;
+  bool _running = false;
+
+  bool get isRunning => _running;
+
+  void start() {
+    if (_running) return;
+    if (!policy.enabled) {
+      throw StateError('MCP server is disabled until explicitly enabled');
+    }
+    final errors = policy.validate();
+    if (errors.isNotEmpty) {
+      throw StateError(errors.join('; '));
+    }
+    _running = true;
+  }
+
+  void stop() {
+    tokens.revokeAll();
+    _running = false;
+  }
+
+  McpSessionToken issueToken({
+    required McpPermission permission,
+    Duration ttl = const Duration(minutes: 30),
+    DateTime? now,
+  }) {
+    if (!_running) throw StateError('MCP server is not running');
+    return tokens.issue(permission: permission, ttl: ttl, now: now);
+  }
+
+  McpSessionToken? authorize(
+    String value, {
+    required McpPermission requiredPermission,
+    DateTime? now,
+  }) {
+    if (!_running) return null;
+    return tokens.validate(
+      value,
+      requiredPermission: requiredPermission,
+      now: now,
+    );
+  }
+}
