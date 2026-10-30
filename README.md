@@ -1,11 +1,12 @@
 # relgeo_mcp
 
 Repository: `relgeo/mcp`. This is the private, non-publishable package
-repository for the MCP contract spike.
+repository for the RelGeo MCP contract and protocol adapter.
 
-Pure-Dart contract package for the RelGeo MCP server and desktop session
-bridge. It deliberately has no Flutter, widget, filesystem, or transport
-dependency.
+Pure-Dart contract and protocol package for the RelGeo MCP server and desktop
+session bridge. It deliberately has no Flutter, widget, filesystem, or socket
+transport dependency. The Flutter desktop host owns the local HTTP listener
+and supplies the active-document bridge.
 
 This package currently defines the session/security boundary spike:
 
@@ -19,14 +20,17 @@ This package currently defines the session/security boundary spike:
   no-autosave defaults.
 - `mcp_schema.dart` defines the typed MVP tool/resource contract, bounded
   inputs, source proposals, validation results, diagnostics, and provenance.
-- `local_dispatch.dart` provides typed seven-tool dispatch, canonical resource
+- `local_dispatch.dart` provides typed seven-tool dispatch, desktop preview
+  dispatch for capability/syntax/example/document reads, canonical resource
   list/read, and a transport-independent JSON-RPC router. Owner callbacks are
-  injected so this package does not duplicate `spec/id`, `core`, language
-  service, or renderer semantics.
+  injected so this package does not duplicate core, language-service, or
+  renderer semantics. Desktop syntax guidance is currently a small local
+  preview index, not a complete `spec/id` search.
 
-The package does not select an MCP SDK or socket transport. The router is the
-SDK-neutral boundary; stdio/HTTP framing and host lifecycle remain decisions
-for the conformance spike described in
+The package does not select an MCP SDK or implement socket transport. The
+router is the SDK-neutral boundary; HTTP framing and host lifecycle are owned
+by the Flutter desktop integration. Standalone stdio remains a separate
+decision in the conformance spike described in
 `docs/plans/11-mcp-agent-integration.md`.
 
 The transport fixture lives under `tool/`. Run the dependency-free stdio
