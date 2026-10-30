@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import '../contract/mcp_schema.dart';
 import '../contract/session_bridge.dart';
+import '../spec/spec_index.dart';
 
 /// A protocol-level invalid request or method error.
 class McpDispatchException implements Exception {
@@ -93,16 +94,19 @@ class RelGeoMcpResourceStore {
     Map<String, McpResourceContent> staticResources =
         const <String, McpResourceContent>{},
     this.activeBridge,
+    this.specIndex,
   }) : _staticResources = Map<String, McpResourceContent>.unmodifiable(
          staticResources,
        );
 
   final Map<String, McpResourceContent> _staticResources;
   final RelGeoAgentBridge? activeBridge;
+  final SpecSectionIndex? specIndex;
 
   List<Map<String, Object?>> listResources({bool includeUnavailable = true}) {
     final uris = <String>{
       if (includeUnavailable) ...relGeoMvpResourceUris,
+      if (specIndex != null) ...relGeoSpecRetrievalResourceUris,
       ..._staticResources.keys,
       if (activeBridge != null) ...<String>[
         RelGeoResourceUri.activeDocument().value,
@@ -118,6 +122,19 @@ class RelGeoMcpResourceStore {
           },
         )
         .toList(growable: false);
+  }
+
+  List<Map<String, Object?>> listResourceTemplates() {
+    if (specIndex == null) return const <Map<String, Object?>>[];
+    return const <Map<String, Object?>>[
+      <String, Object?>{
+        'uriTemplate': relGeoSpecSectionResourceTemplate,
+        'name': 'RelGeo specification section',
+        'description':
+            'Read one complete section from the pinned RelGeo Markdown specification. Encode the sectionId path and anchor as one URI segment.',
+        'mimeType': 'application/json',
+      },
+    ];
   }
 
   Future<McpResourceContent> read(String value) async {
@@ -161,9 +178,47 @@ class RelGeoMcpResourceStore {
         );
       case RelGeoResourceKind.specIndex:
       case RelGeoResourceKind.specRule:
+      case RelGeoResourceKind.specSection:
       case RelGeoResourceKind.examplesIndex:
       case RelGeoResourceKind.example:
       case RelGeoResourceKind.diagnosticsCatalog:
+        if (specIndex != null && uri.kind == RelGeoResourceKind.specIndex) {
+          return McpResourceContent(
+            uri: uri.value,
+            mimeType: 'application/json',
+            text: specIndex!.indexResourceText(),
+          );
+        }
+        if (specIndex != null && uri.kind == RelGeoResourceKind.specSection) {
+          late final GetSpecSectionResult section;
+          try {
+            section = specIndex!.getSection(
+              GetSpecSectionInput(
+                sectionId: SpecSectionId.parse(uri.id!),
+                specVersion: specIndex!.snapshot.specVersion,
+              ),
+            );
+          } on SpecSectionNotFoundException catch (error) {
+            throw McpDispatchException(
+              -32004,
+              error.toString(),
+              data: <String, Object?>{'sectionId': uri.id!},
+            );
+          }
+          return McpResourceContent(
+            uri: uri.value,
+            mimeType: 'application/json',
+            text: jsonEncode(section.toJson()),
+            provenance: section.section.provenance.isNormative
+                ? McpProvenance(
+                    source: McpProvenanceSource.spec,
+                    sourceUrl: section.section.provenance.sourceUrl,
+                    specVersion: section.section.provenance.specVersion,
+                    revision: section.section.provenance.revision,
+                  )
+                : null,
+          );
+        }
         final content = _staticResources[uri.value];
         if (content == null) {
           throw McpDispatchException(
@@ -199,46 +254,153 @@ class RelGeoMcpResourceStore {
 /// Typed tool dispatcher. It validates raw protocol arguments before invoking
 /// an owner callback and serializes only the declared result type.
 class RelGeoMcpToolDispatcher {
-  const RelGeoMcpToolDispatcher(this.handlers);
+  const RelGeoMcpToolDispatcher(this.handlers, {this.specIndex});
 
-  final RelGeoMcpToolHandlers handlers;
+  final RelGeoMcpToolHandlers? handlers;
+  final SpecSectionIndex? specIndex;
 
-  List<Map<String, Object?>> listTools() => relGeoMvpToolContracts
-      .map(
+  List<Map<String, Object?>> listTools() {
+    final tools = <Map<String, Object?>>[
+      ...<RelGeoToolContract>[
+        if (handlers != null) ...relGeoMvpToolContracts,
+        if (specIndex != null) ...relGeoSpecRetrievalToolContracts,
+      ].map(
         (contract) => <String, Object?>{
           'name': contract.name,
           'description': contract.description,
           'inputSchema': contract.inputSchema,
         },
-      )
-      .toList(growable: false);
+      ),
+    ];
+    if (specIndex != null) {
+      tools.insert(0, _capabilitiesTool);
+      if (handlers == null) {
+        tools.insert(1, _specSearchCompatibilityAliasTool);
+      }
+    }
+    return List<Map<String, Object?>>.unmodifiable(tools);
+  }
+
+  static const Map<String, Object?> _capabilitiesTool = <String, Object?>{
+    'name': 'relgeo_get_capabilities',
+    'description':
+        'Report the read-only tools, resources, pinned spec snapshot, and limitations.',
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'additionalProperties': false,
+      'properties': <String, Object?>{},
+    },
+  };
+
+  static const Map<String, Object?> _specSearchCompatibilityAliasTool =
+      <String, Object?>{
+        'name': 'relgeo_find_syntax',
+        'description':
+            'Compatibility alias for searching the pinned local RelGeo specification.',
+        'inputSchema': <String, Object?>{
+          'type': 'object',
+          'additionalProperties': false,
+          'required': <String>['query'],
+          'properties': <String, Object?>{
+            'query': <String, Object?>{
+              'type': 'string',
+              'minLength': 1,
+              'maxLength': 512,
+            },
+            'specVersion': <String, Object?>{
+              'type': 'string',
+              'minLength': 1,
+              'default': relGeoMvpSpecVersion,
+            },
+            'maxResults': <String, Object?>{
+              'type': 'integer',
+              'minimum': 1,
+              'maximum': 32,
+              'default': 8,
+            },
+          },
+        },
+      };
+
+  Map<String, Object?> capabilityMetadata() {
+    final loaded = specIndex != null;
+    return <String, Object?>{
+      'server': 'relgeo-mcp',
+      'mode': 'read-only desktop preview',
+      'sourceOfTruth': 'spec/id',
+      'tools': listTools().map((tool) => tool['name']).toList(growable: false),
+      'resources': <String>[
+        if (loaded) ...relGeoSpecRetrievalResourceUris,
+        'relgeo://document/active',
+        'relgeo://document/active/diagnostics',
+      ],
+      'specSnapshot': loaded ? specIndex!.snapshot.toJson() : null,
+      'specCoverage': loaded ? 'full spec/id Markdown snapshot' : 'unavailable',
+      'limitations': <String>[
+        'Cannot create or edit drawings.',
+        if (!loaded)
+          'Full-spec retrieval is unavailable until the host supplies a pinned local Markdown snapshot.',
+        'Examples remain illustrative and are not normative rules.',
+      ],
+    };
+  }
 
   Future<Map<String, Object?>> call(String name, Object? rawArguments) async {
     switch (name) {
+      case 'relgeo_search_spec':
+        final index = specIndex;
+        if (index == null) throw _specIndexUnavailable(name);
+        try {
+          return index.search(_searchSpec(rawArguments)).toJson();
+        } on SpecVersionMismatchException catch (error) {
+          throw _versionMismatch(error);
+        }
+      case 'relgeo_get_spec_section':
+        final index = specIndex;
+        if (index == null) throw _specIndexUnavailable(name);
+        try {
+          return index.getSection(_getSpecSection(rawArguments)).toJson();
+        } on SpecSectionNotFoundException catch (error) {
+          throw _sectionNotFound(error);
+        } on SpecVersionMismatchException catch (error) {
+          throw _versionMismatch(error);
+        }
+      case 'relgeo_get_capabilities':
+        _requireNoArguments(rawArguments, name);
+        return capabilityMetadata();
       case 'relgeo_find_syntax':
-        return (await handlers.findSyntax(_findSyntax(rawArguments))).toJson();
+        if (specIndex != null) {
+          try {
+            return specIndex!.search(_searchSpec(rawArguments)).toJson();
+          } on SpecVersionMismatchException catch (error) {
+            throw _versionMismatch(error);
+          }
+        }
+        return (await _requireHandlers(name).findSyntax(
+          _findSyntax(rawArguments),
+        )).toJson();
       case 'relgeo_get_syntax_rule':
-        return (await handlers.getSyntaxRule(
+        return (await _requireHandlers(name).getSyntaxRule(
           _getSyntaxRule(rawArguments),
         )).toJson();
       case 'relgeo_get_examples':
-        return (await handlers.getExamples(
+        return (await _requireHandlers(name).getExamples(
           _getExamples(rawArguments),
         )).toJson();
       case 'relgeo_complete_source':
-        return (await handlers.completeSource(
+        return (await _requireHandlers(name).completeSource(
           _completeSource(rawArguments),
         )).toJson();
       case 'relgeo_validate_source':
-        return (await handlers.validateSource(
+        return (await _requireHandlers(name).validateSource(
           _validateSource(rawArguments),
         )).toJson();
       case 'relgeo_explain_diagnostic':
-        return (await handlers.explainDiagnostic(
+        return (await _requireHandlers(name).explainDiagnostic(
           _explainDiagnostic(rawArguments),
         )).toJson();
       case 'relgeo_render_source':
-        return (await handlers.renderSource(
+        return (await _requireHandlers(name).renderSource(
           _renderSource(rawArguments),
         )).toJson();
       default:
@@ -248,6 +410,83 @@ class RelGeoMcpToolDispatcher {
           data: <String, Object?>{'name': name},
         );
     }
+  }
+
+  static McpDispatchException _specIndexUnavailable(String tool) =>
+      McpDispatchException(
+        -32001,
+        'Full RelGeo spec snapshot is unavailable for $tool',
+        data: <String, Object?>{
+          'tool': tool,
+          'sourceOfTruth': 'spec/id',
+          'required': 'pinned local Markdown snapshot',
+        },
+      );
+
+  RelGeoMcpToolHandlers _requireHandlers(String tool) {
+    final value = handlers;
+    if (value != null) return value;
+    throw McpDispatchException(
+      -32001,
+      'RelGeo tool implementation is unavailable for $tool',
+    );
+  }
+
+  static McpDispatchException _versionMismatch(
+    SpecVersionMismatchException error,
+  ) => McpDispatchException(
+    -32602,
+    error.toString(),
+    data: <String, Object?>{
+      'requestedSpecVersion': error.requested,
+      'availableSpecVersion': error.available,
+    },
+  );
+
+  static McpDispatchException _sectionNotFound(
+    SpecSectionNotFoundException error,
+  ) => McpDispatchException(
+    -32004,
+    error.toString(),
+    data: <String, Object?>{'sectionId': error.sectionId},
+  );
+
+  static void _requireNoArguments(Object? raw, String tool) {
+    if (raw is! Map || raw.isEmpty) return;
+    throw McpDispatchException(-32602, '$tool does not accept arguments');
+  }
+
+  static SearchSpecInput _searchSpec(Object? raw) {
+    final args = _arguments(raw, 'relgeo_search_spec');
+    _rejectUnknown(args, const <String>{'query', 'specVersion', 'maxResults'});
+    final query = _requiredString(args, 'query');
+    if (query.length > 512) {
+      throw const McpDispatchException(
+        -32602,
+        'query exceeds the 512 character limit',
+      );
+    }
+    return SearchSpecInput(
+      query: query,
+      specVersion: _optionalVersion(args),
+      maxResults: _optionalInt(args, 'maxResults', 8, 1, 32),
+    );
+  }
+
+  static GetSpecSectionInput _getSpecSection(Object? raw) {
+    final args = _arguments(raw, 'relgeo_get_spec_section');
+    _rejectUnknown(args, const <String>{'sectionId', 'specVersion'});
+    final value = _requiredString(args, 'sectionId');
+    late final SpecSectionId sectionId;
+    try {
+      sectionId = SpecSectionId.parse(value);
+    } on FormatException catch (error) {
+      throw McpDispatchException(-32602, error.message);
+    }
+    return GetSpecSectionInput(
+      sectionId: sectionId,
+      specVersion: _optionalVersion(args),
+    );
   }
 
   static FindSyntaxInput _findSyntax(Object? raw) {
@@ -561,7 +800,7 @@ class RelGeoMcpJsonRpcRouter {
           'protocolVersion': _negotiatedProtocolVersion!,
           if (activeBridge != null)
             'instructions':
-                'RelGeo MCP is a read-only desktop preview. For syntax and how-to questions, call relgeo_find_syntax and relgeo_get_syntax_rule first; the desktop preview currently indexes the normative rect rule only. Treat spec results as normative. You may then call relgeo_get_examples for an illustrative snippet, clearly labeled as an example. Use relgeo_get_active_document to inspect the open document. It cannot create or edit drawings.',
+                'RelGeo MCP is a read-only desktop preview. For syntax and how-to questions, use the full local spec search when its snapshot is loaded, then retrieve the complete section before answering. Treat spec results as normative. You may then call relgeo_get_examples for an illustrative snippet, clearly labeled as an example. Use relgeo_get_active_document to inspect the open document. It cannot create or edit drawings.',
           'capabilities': <String, Object?>{
             'tools': <String, Object?>{'listChanged': false},
             'resources': <String, Object?>{
@@ -588,21 +827,28 @@ class RelGeoMcpJsonRpcRouter {
     try {
       switch (method) {
         case 'tools/list':
+          final toolDispatcher = dispatcher;
+          final exposeDesktopExamples = activeBridge != null &&
+              (toolDispatcher == null || toolDispatcher.handlers == null);
           return _response(
             hasId,
             id,
             result: <String, Object?>{
-              'tools':
-                  dispatcher?.listTools() ??
-                  (activeBridge == null
-                      ? const <Object?>[]
-                      : <Map<String, Object?>>[
-                          _capabilitiesTool,
-                          _findSyntaxTool,
-                          _getSyntaxRuleTool,
-                          _examplesTool,
-                          ..._activeDocumentTools,
-                        ]),
+              'tools': toolDispatcher == null
+                  ? (activeBridge == null
+                        ? const <Object?>[]
+                        : <Map<String, Object?>>[
+                            _capabilitiesTool,
+                            _findSyntaxTool,
+                            _getSyntaxRuleTool,
+                            _examplesTool,
+                            ..._activeDocumentTools,
+                          ])
+                  : <Map<String, Object?>>[
+                      ...toolDispatcher.listTools(),
+                      if (exposeDesktopExamples) _examplesTool,
+                      if (activeBridge != null) ..._activeDocumentTools,
+                    ],
             },
           );
         case 'tools/call':
@@ -637,6 +883,40 @@ class RelGeoMcpJsonRpcRouter {
               name == 'relgeo_get_examples' &&
               activeBridge != null) {
             output = _getDesktopExamples(params['arguments']);
+          } else if (name == 'relgeo_get_examples' &&
+              activeBridge != null &&
+              (toolDispatcher == null || toolDispatcher.handlers == null)) {
+            output = _getDesktopExamples(params['arguments']);
+          } else if (name == 'relgeo_get_capabilities' &&
+              toolDispatcher != null) {
+            final metadata = toolDispatcher.capabilityMetadata();
+            if (toolDispatcher.handlers == null && activeBridge != null) {
+              final toolNames = <Object?>[
+                ...(metadata['tools'] as List<Object?>),
+                'relgeo_get_examples',
+              ];
+              output = <String, Object?>{
+                ...metadata,
+                'tools': toolNames,
+              };
+            } else {
+              output = metadata;
+            }
+          } else if (name == 'relgeo_get_active_document' &&
+              activeBridge != null) {
+            _requireNoArguments(
+              params['arguments'],
+              'relgeo_get_active_document',
+            );
+            final bridge = activeBridge!;
+            final snapshot = await bridge.getActiveDocument();
+            if (snapshot == null) {
+              throw const McpDispatchException(
+                -32001,
+                'No active document session is connected',
+              );
+            }
+            output = snapshot.toJson();
           } else if (toolDispatcher != null) {
             output = await toolDispatcher.call(name, params['arguments']);
           } else {
@@ -677,6 +957,14 @@ class RelGeoMcpJsonRpcRouter {
             id,
             result: <String, Object?>{
               'resources': resources.listResources(includeUnavailable: false),
+            },
+          );
+        case 'resources/templates/list':
+          return _response(
+            hasId,
+            id,
+            result: <String, Object?>{
+              'resourceTemplates': resources.listResourceTemplates(),
             },
           );
         case 'resources/read':
@@ -754,7 +1042,7 @@ class RelGeoMcpJsonRpcRouter {
     ],
     'limitations': <String>[
       'Cannot create or edit drawings.',
-      'Normative desktop guidance currently covers the rect object rule only; it is not a complete syntax reference.',
+      'Full-spec search requires a pinned local Markdown snapshot supplied by the host.',
       'Includes beginner examples for a square and rectangle as illustrations, not as normative rules.',
       'Does not provide standalone validation or rendering.',
       'Can read only the active desktop document and its diagnostics.',
@@ -775,7 +1063,7 @@ class RelGeoMcpJsonRpcRouter {
   static const Map<String, Object?> _findSyntaxTool = <String, Object?>{
     'name': 'relgeo_find_syntax',
     'description':
-        'Search the desktop preview index of normative RelGeo syntax rules (currently rect only). Use before giving syntax guidance.',
+        'Search the pinned local RelGeo specification before giving syntax guidance. The result is unavailable until the host supplies the full snapshot.',
     'inputSchema': <String, Object?>{
       'type': 'object',
       'additionalProperties': false,
@@ -845,54 +1133,6 @@ class RelGeoMcpJsonRpcRouter {
       },
     },
   };
-
-  static const SyntaxMatch _rectSyntaxMatch = SyntaxMatch(
-    ruleId: 'geometry.rect',
-    title: '14.3 Rect',
-    summary:
-        'Normative: rect represents a rectangle. Its size is [width, height]; placement can use place.center.',
-    provenance: McpProvenance(
-      source: McpProvenanceSource.spec,
-      sourceUrl:
-          'https://github.com/relgeo/workspace/blob/main/spec/id/geometry/14-geometry-objects.md#143-rect',
-      specVersion: relGeoMvpSpecVersion,
-      revision: 'v0.5',
-    ),
-  );
-
-  static const DocumentationResult
-  _rectSyntaxDocumentation = DocumentationResult(
-    title: '14.3 Rect',
-    content:
-        '''Normative rule from spec/id/geometry/14-geometry-objects.md, section 14.3.
-
-Rect represents a rectangle. Its size mode requires width and height, in that order:
-
-objects:
-  panel:
-    type: rect
-    size: [200mm, 100mm]
-
-Placement may be set with place.center:
-
-objects:
-  panel:
-    type: rect
-    size: [200mm, 100mm]
-    place:
-      center: origin
-
-The documented properties are width (scalar-length), height (scalar-length), and area (scalar-area).
-
-Practical interpretation (not an additional normative rule): a square can be represented by a rect whose width and height are equal.''',
-    provenance: DocumentationProvenance(
-      source: DocumentationSource.spec,
-      sourceUrl:
-          'https://github.com/relgeo/workspace/blob/main/spec/id/geometry/14-geometry-objects.md#143-rect',
-      specVersion: relGeoMvpSpecVersion,
-      revision: 'v0.5',
-    ),
-  );
 
   static final List<ExampleResult> _desktopExamples = <ExampleResult>[
     ExampleResult(
@@ -1043,22 +1283,13 @@ objects:
         'maxResults must be an integer from 1 to 32',
       );
     }
-    final normalized = query.toLowerCase().trim();
-    const rectTerms = <String>[
-      'rect',
-      'rectangle',
-      'persegi',
-      'kotak',
-      'square',
-      'lebar',
-      'tinggi',
-      'width',
-      'height',
-    ];
-    final matches = rectTerms.any(normalized.contains)
-        ? <SyntaxMatch>[_rectSyntaxMatch].take(maxResults).toList()
-        : const <SyntaxMatch>[];
-    return FindSyntaxResult(query: query, matches: matches).toJson();
+    // The legacy desktop-only route has no corpus owner. It must not invent a
+    // rule from a hardcoded preview; hosts with a snapshot use SpecSectionIndex
+    // through RelGeoMcpToolDispatcher instead.
+    return FindSyntaxResult(
+      query: query,
+      matches: const <SyntaxMatch>[],
+    ).toJson();
   }
 
   static Map<String, Object?> _getDesktopSyntaxRule(Object? rawArguments) {
@@ -1075,16 +1306,11 @@ objects:
       );
     }
     _requireDesktopSpecVersion(arguments['specVersion']);
-    if (ruleId != _rectSyntaxMatch.ruleId) {
-      throw McpDispatchException(
-        -32601,
-        'No desktop syntax rule is available for $ruleId',
-        data: <String, Object?>{
-          'availableRuleIds': <String>[_rectSyntaxMatch.ruleId],
-        },
-      );
-    }
-    return SyntaxRuleResult(documentation: _rectSyntaxDocumentation).toJson();
+    throw McpDispatchException(
+      -32601,
+      'No desktop syntax rule is available until the full spec snapshot is loaded',
+      data: <String, Object?>{'ruleId': ruleId},
+    );
   }
 
   static Map<String, Object?> _desktopArguments(

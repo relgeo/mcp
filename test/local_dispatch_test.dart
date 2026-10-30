@@ -8,6 +8,14 @@ const _specProvenance = McpProvenance(
   revision: 'test-spec-revision',
 );
 
+const _specSnapshot = SpecSnapshotMetadata(
+  specVersion: '0.5',
+  revision: 'test-spec-revision',
+  digest: 'sha256:fixture',
+  sourceUrl: 'https://github.com/relgeo/spec/tree/test-spec-revision/id',
+  fileCount: 1,
+);
+
 RelGeoMcpToolHandlers _handlers() => RelGeoMcpToolHandlers(
   findSyntax: (input) => FindSyntaxResult(
     query: input.query,
@@ -98,6 +106,22 @@ class _Bridge implements RelGeoAgentBridge {
 }
 
 void main() {
+  final specIndex = SpecSectionIndex.fromDocuments(
+    snapshot: _specSnapshot,
+    documents: const <SpecMarkdownDocument>[
+      SpecMarkdownDocument(
+        relativePath: 'geometry/14-geometry-objects.md',
+        content: '''# 14. Geometry Objects
+
+Status dokumen: `Normative`
+
+## 14.3 Rect
+
+Rect uses width and height.''',
+      ),
+    ],
+  );
+
   test(
     'dispatcher lists typed tools and preserves input/result boundaries',
     () async {
@@ -284,6 +308,301 @@ void main() {
       );
     },
   );
+
+  test(
+    'dispatcher and resource store use the supplied full spec index',
+    () async {
+      final dispatcher = RelGeoMcpToolDispatcher(
+        _handlers(),
+        specIndex: specIndex,
+      );
+      expect(dispatcher.listTools(), hasLength(10));
+      expect(dispatcher.listTools().first['name'], 'relgeo_get_capabilities');
+
+      final search = await dispatcher.call('relgeo_search_spec', {
+        'query': 'rect width',
+      });
+      expect(search['noResults'], isFalse);
+      expect((search['matches'] as List), isNotEmpty);
+
+      final section = await dispatcher.call('relgeo_get_spec_section', {
+        'sectionId': 'geometry/14-geometry-objects.md#143-rect',
+      });
+      expect(
+        (section['section'] as Map)['content'],
+        contains('Rect uses width and height'),
+      );
+      final alias = await dispatcher.call('relgeo_find_syntax', {
+        'query': 'rect',
+      });
+      expect(alias['noResults'], isFalse);
+
+      final capabilities = await dispatcher.call(
+        'relgeo_get_capabilities',
+        const <String, Object?>{},
+      );
+      expect(capabilities['sourceOfTruth'], 'spec/id');
+      expect(capabilities['specCoverage'], 'full spec/id Markdown snapshot');
+      expect((capabilities['specSnapshot'] as Map)['digest'], 'sha256:fixture');
+
+      final noResults = await dispatcher.call('relgeo_search_spec', {
+        'query': 'not-in-the-fixture',
+      });
+      expect(noResults['noResults'], isTrue);
+      expect(noResults['matches'], isEmpty);
+
+      await expectLater(
+        dispatcher.call('relgeo_search_spec', {
+          'query': 'rect',
+          'specVersion': '0.6',
+        }),
+        throwsA(
+          isA<McpDispatchException>()
+              .having((error) => error.code, 'code', -32602)
+              .having(
+                (error) => error.data?['availableSpecVersion'],
+                'available version',
+                '0.5',
+              ),
+        ),
+      );
+    await expectLater(
+      dispatcher.call('relgeo_get_spec_section', {
+        'sectionId': 'geometry/14-geometry-objects.md#143-rect',
+        'specVersion': '0.6',
+      }),
+      throwsA(isA<McpDispatchException>()),
+    );
+    await expectLater(
+      dispatcher.call('relgeo_get_spec_section', {
+        'sectionId': 'geometry/missing.md#missing',
+      }),
+      throwsA(
+        isA<McpDispatchException>()
+            .having((error) => error.code, 'code', -32004)
+            .having(
+              (error) => error.data?['sectionId'],
+              'section id',
+              'geometry/missing.md#missing',
+            ),
+      ),
+    );
+
+      final store = RelGeoMcpResourceStore(specIndex: specIndex);
+      expect(store.listResources(includeUnavailable: false), hasLength(1));
+      expect(store.listResourceTemplates(), hasLength(1));
+      expect(
+        store.listResourceTemplates().single['uriTemplate'],
+        relGeoSpecSectionResourceTemplate,
+      );
+      expect(
+        (await store.read('relgeo://spec/index')).text,
+        contains('143-rect'),
+      );
+      expect(
+        (await store.read(
+          'relgeo://spec/sections/geometry%2F14-geometry-objects.md%23143-rect',
+        )).text,
+        contains('Rect uses width and height'),
+      );
+      await expectLater(
+        store.read('relgeo://spec/sections/geometry%2Fmissing.md%23missing'),
+        throwsA(isA<McpDispatchException>()),
+      );
+    },
+  );
+
+  test('spec-only dispatcher advertises only loaded retrieval capabilities', () {
+    final dispatcher = RelGeoMcpToolDispatcher(null, specIndex: specIndex);
+    final names = dispatcher.listTools().map((tool) => tool['name']);
+
+    expect(
+      names,
+      containsAll(<String>[
+        'relgeo_get_capabilities',
+        'relgeo_search_spec',
+        'relgeo_get_spec_section',
+        'relgeo_find_syntax',
+      ]),
+    );
+    expect(names, isNot(contains('relgeo_validate_source')));
+  });
+
+  test('desktop bridge keeps examples separate from normative retrieval', () async {
+    final router = RelGeoMcpJsonRpcRouter(
+      dispatcher: RelGeoMcpToolDispatcher(null, specIndex: specIndex),
+      activeBridge: _Bridge(),
+      resources: RelGeoMcpResourceStore(
+        activeBridge: _Bridge(),
+        specIndex: specIndex,
+      ),
+    );
+    await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'initialize',
+      'params': <String, Object?>{
+        'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
+      },
+    });
+    await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'method': 'notifications/initialized',
+    });
+
+    final tools = await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 2,
+      'method': 'tools/list',
+    });
+    expect(
+      ((tools?['result'] as Map)['tools'] as List)
+          .map((tool) => (tool as Map)['name']),
+      contains('relgeo_get_examples'),
+    );
+
+    final examples = await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 3,
+      'method': 'tools/call',
+      'params': <String, Object?>{
+        'name': 'relgeo_get_examples',
+        'arguments': <String, Object?>{'query': 'square'},
+      },
+    });
+    final example = (((examples?['result'] as Map)['structuredContent']
+        as Map)['examples'] as List).single as Map;
+    expect((example['provenance'] as Map)['source'], 'example');
+    expect((example['provenance'] as Map)['normative'], isFalse);
+
+    final capabilities = await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 4,
+      'method': 'tools/call',
+      'params': <String, Object?>{
+        'name': 'relgeo_get_capabilities',
+        'arguments': const <String, Object?>{},
+      },
+    });
+    expect(
+      ((capabilities?['result'] as Map)['structuredContent'] as Map)['tools'],
+      contains('relgeo_get_examples'),
+    );
+  });
+
+  test(
+    'JSON-RPC full-spec boundary exposes tools, resources, and errors',
+    () async {
+      final router = RelGeoMcpJsonRpcRouter(
+        dispatcher: RelGeoMcpToolDispatcher(_handlers(), specIndex: specIndex),
+        resources: RelGeoMcpResourceStore(specIndex: specIndex),
+      );
+
+      final initialize = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'initialize',
+        'params': <String, Object?>{
+          'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
+        },
+      });
+      expect((initialize?['result'] as Map)['serverInfo'], isNotNull);
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'method': 'notifications/initialized',
+      });
+
+      final tools = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 2,
+        'method': 'tools/list',
+      });
+      final listed = ((tools?['result'] as Map)['tools'] as List).cast<Map>();
+      expect(
+        listed.map((tool) => tool['name']),
+        containsAll(<String>[
+          'relgeo_search_spec',
+          'relgeo_get_spec_section',
+          'relgeo_find_syntax',
+          'relgeo_get_capabilities',
+        ]),
+      );
+
+      final search = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 3,
+        'method': 'tools/call',
+        'params': <String, Object?>{
+          'name': 'relgeo_search_spec',
+          'arguments': <String, Object?>{'query': 'width'},
+        },
+      });
+      final searchResult = search?['result'] as Map;
+      expect(searchResult['isError'], isFalse);
+      expect(
+        ((searchResult['structuredContent'] as Map)['snapshot']
+            as Map)['revision'],
+        'test-spec-revision',
+      );
+
+      final mismatch = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 4,
+        'method': 'tools/call',
+        'params': <String, Object?>{
+          'name': 'relgeo_search_spec',
+          'arguments': <String, Object?>{
+            'query': 'width',
+            'specVersion': '0.6',
+          },
+        },
+      });
+      expect((mismatch?['error'] as Map)['code'], -32602);
+      expect(
+        ((mismatch?['error'] as Map)['data'] as Map)['availableSpecVersion'],
+        '0.5',
+      );
+
+      final resourceList = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 5,
+        'method': 'resources/list',
+      });
+      expect(
+        ((resourceList?['result'] as Map)['resources'] as List),
+        hasLength(1),
+      );
+
+      final templateList = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 6,
+        'method': 'resources/templates/list',
+      });
+      final templates =
+          ((templateList?['result'] as Map)['resourceTemplates'] as List);
+      expect(templates, hasLength(1));
+      expect(
+        (templates.single as Map)['uriTemplate'],
+        relGeoSpecSectionResourceTemplate,
+      );
+    },
+  );
+
+  test('canonical retrieval reports unavailable without a snapshot', () async {
+    final dispatcher = RelGeoMcpToolDispatcher(_handlers());
+    await expectLater(
+      dispatcher.call('relgeo_search_spec', {'query': 'rect'}),
+      throwsA(
+        isA<McpDispatchException>()
+            .having((error) => error.code, 'code', -32001)
+            .having(
+              (error) => error.data?['required'],
+              'required snapshot marker',
+              'pinned local Markdown snapshot',
+            ),
+      ),
+    );
+  });
 
   test('server session is explicitly enabled and revokes tokens on stop', () {
     final session = McpServerSession(

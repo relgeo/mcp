@@ -71,6 +71,332 @@ class McpProvenance {
   };
 }
 
+/// Status written by a Markdown spec document. The status is intentionally
+/// separate from [McpProvenanceSource]: an informative index is still sourced
+/// from `spec`, but it is not a normative language rule.
+enum SpecDocumentStatus { normative, informative, implementationNote }
+
+extension SpecDocumentStatusJson on SpecDocumentStatus {
+  String get wireValue {
+    switch (this) {
+      case SpecDocumentStatus.normative:
+        return 'normative';
+      case SpecDocumentStatus.informative:
+        return 'informative';
+      case SpecDocumentStatus.implementationNote:
+        return 'implementation-note';
+    }
+  }
+
+  bool get isNormative => this == SpecDocumentStatus.normative;
+}
+
+/// Version identity for one complete, offline spec snapshot.
+class SpecSnapshotMetadata {
+  const SpecSnapshotMetadata({
+    required this.specVersion,
+    required this.revision,
+    required this.digest,
+    required this.sourceUrl,
+    required this.fileCount,
+    this.digestAlgorithm = 'sha256',
+  }) : assert(specVersion != ''),
+       assert(revision != ''),
+       assert(digest != ''),
+       assert(sourceUrl != ''),
+       assert(fileCount >= 0),
+       assert(digestAlgorithm != '');
+
+  final String specVersion;
+  final String revision;
+  final String digest;
+  final String digestAlgorithm;
+  final String sourceUrl;
+  final int fileCount;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'specVersion': specVersion,
+    'revision': revision,
+    'digest': digest,
+    'digestAlgorithm': digestAlgorithm,
+    'sourceUrl': sourceUrl,
+    'fileCount': fileCount,
+  };
+}
+
+/// Stable identity of a Markdown heading within the `spec/id/` snapshot.
+///
+/// The value is relative to `spec/id/` and is independent of snapshot
+/// revision/digest, so links remain stable when a new snapshot is published.
+/// Anchors are generated once from the normalized Markdown heading and then
+/// treated as data; retrieval must not silently change them between revisions.
+class SpecSectionId {
+  const SpecSectionId({required this.relativePath, required this.anchor})
+    : assert(relativePath != ''),
+      assert(anchor != '');
+
+  factory SpecSectionId.parse(String value) {
+    final separator = value.indexOf('#');
+    if (separator <= 0 || separator == value.length - 1) {
+      throw FormatException('Invalid spec section ID', value);
+    }
+    final relativePath = value.substring(0, separator);
+    final anchor = value.substring(separator + 1);
+    if (relativePath.startsWith('/') ||
+        !relativePath.endsWith('.md') ||
+        relativePath.contains('\\') ||
+        relativePath.split('/').contains('..') ||
+        relativePath.split('/').contains('.') ||
+        anchor.contains('/') ||
+        anchor.contains('#') ||
+        anchor.contains(' ')) {
+      throw FormatException('Invalid spec section ID', value);
+    }
+    final id = SpecSectionId(relativePath: relativePath, anchor: anchor);
+    return id;
+  }
+
+  final String relativePath;
+  final String anchor;
+
+  String get value => '$relativePath#$anchor';
+
+  @override
+  String toString() => value;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SpecSectionId &&
+      other.relativePath == relativePath &&
+      other.anchor == anchor;
+
+  @override
+  int get hashCode => Object.hash(relativePath, anchor);
+}
+
+/// Provenance for a section or search match from the pinned Markdown snapshot.
+class SpecProvenance {
+  const SpecProvenance({
+    required this.status,
+    required this.sourceUrl,
+    required this.specVersion,
+    required this.revision,
+    required this.digest,
+  }) : assert(sourceUrl != ''),
+       assert(specVersion != ''),
+       assert(revision != ''),
+       assert(digest != '');
+
+  final SpecDocumentStatus status;
+  final String sourceUrl;
+  final String specVersion;
+  final String revision;
+  final String digest;
+
+  bool get isNormative => status.isNormative;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'source': McpProvenanceSource.spec.name,
+    'sourceUrl': sourceUrl,
+    'specVersion': specVersion,
+    'revision': revision,
+    'digest': digest,
+    'normative': isNormative,
+    'status': status.wireValue,
+  };
+}
+
+class SpecSection {
+  const SpecSection({
+    required this.id,
+    required this.title,
+    required this.parentHeadings,
+    required this.content,
+    required this.provenance,
+  }) : assert(title != ''),
+       assert(content != '');
+
+  final SpecSectionId id;
+  final String title;
+  final List<String> parentHeadings;
+  final String content;
+  final SpecProvenance provenance;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'sectionId': id.value,
+    'relativePath': id.relativePath,
+    'anchor': id.anchor,
+    'title': title,
+    'parentHeadings': parentHeadings,
+    'content': content,
+    'provenance': provenance.toJson(),
+  };
+}
+
+class SearchSpecInput {
+  const SearchSpecInput({
+    required this.query,
+    this.specVersion = relGeoMvpSpecVersion,
+    this.maxResults = 8,
+  }) : assert(query != ''),
+       assert(specVersion != ''),
+       assert(query.length <= 512),
+       assert(maxResults >= 1 && maxResults <= 32);
+
+  final String query;
+  final String specVersion;
+  final int maxResults;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'query': query,
+    'specVersion': specVersion,
+    'maxResults': maxResults,
+  };
+}
+
+class SearchSpecMatch {
+  const SearchSpecMatch({
+    required this.sectionId,
+    required this.title,
+    required this.parentHeadings,
+    required this.snippet,
+    required this.score,
+    required this.provenance,
+  }) : assert(title != ''),
+       assert(snippet != ''),
+       assert(score >= 0);
+
+  final SpecSectionId sectionId;
+  final String title;
+  final List<String> parentHeadings;
+  final String snippet;
+  final double score;
+  final SpecProvenance provenance;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'sectionId': sectionId.value,
+    'relativePath': sectionId.relativePath,
+    'anchor': sectionId.anchor,
+    'title': title,
+    'parentHeadings': parentHeadings,
+    'snippet': snippet,
+    'score': score,
+    'provenance': provenance.toJson(),
+  };
+}
+
+class SearchSpecResult {
+  const SearchSpecResult({
+    required this.query,
+    required this.matches,
+    required this.snapshot,
+  });
+
+  final String query;
+  final List<SearchSpecMatch> matches;
+  final SpecSnapshotMetadata snapshot;
+
+  bool get noResults => matches.isEmpty;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'query': query,
+    'matches': matches.map((item) => item.toJson()).toList(),
+    'noResults': noResults,
+    'snapshot': snapshot.toJson(),
+  };
+}
+
+class GetSpecSectionInput {
+  const GetSpecSectionInput({
+    required this.sectionId,
+    this.specVersion = relGeoMvpSpecVersion,
+  }) : assert(specVersion != '');
+
+  final SpecSectionId sectionId;
+  final String specVersion;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'sectionId': sectionId.value,
+    'specVersion': specVersion,
+  };
+}
+
+class GetSpecSectionResult {
+  const GetSpecSectionResult({required this.section, required this.snapshot});
+
+  final SpecSection section;
+  final SpecSnapshotMetadata snapshot;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'section': section.toJson(),
+    'snapshot': snapshot.toJson(),
+  };
+}
+
+class SpecSearchFixture {
+  const SpecSearchFixture({
+    required this.id,
+    required this.query,
+    required this.expectedSectionIds,
+    this.expectsNoResults = false,
+  }) : assert(id != ''),
+       assert(query != '');
+
+  final String id;
+  final String query;
+  final List<String> expectedSectionIds;
+  final bool expectsNoResults;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'id': id,
+    'query': query,
+    'expectedSectionIds': expectedSectionIds,
+    'expectsNoResults': expectsNoResults,
+  };
+}
+
+const relGeoSpecSearchFixtures = <SpecSearchFixture>[
+  SpecSearchFixture(
+    id: 'box',
+    query: 'kotak rect rectangle',
+    expectedSectionIds: <String>[
+      'geometry/14-geometry-objects.md#143-rect',
+      'geometry/14-geometry-objects.md#placement',
+    ],
+  ),
+  SpecSearchFixture(
+    id: 'parameters-and-constants',
+    query: 'parameters constants',
+    expectedSectionIds: <String>[
+      'syntax/08-parameters.md#8-parameters',
+      'syntax/09-constants.md#9-constants',
+    ],
+  ),
+  SpecSearchFixture(
+    id: 'point-on-path',
+    query: 'point on path placement',
+    expectedSectionIds: <String>[
+      'geometry/17-placement.md#173-onpath',
+      'geometry/17-placement.md#172-onpoint',
+    ],
+  ),
+  SpecSearchFixture(
+    id: 'presentation',
+    query: 'dimension annotation views sheets',
+    expectedSectionIds: <String>[
+      'presentation/22-dimension.md#22-dimension-objects',
+      'presentation/23-annotation.md#23-annotation-objects',
+      'presentation/25-views-sheets.md#25-views-and-sheets',
+    ],
+  ),
+  SpecSearchFixture(
+    id: 'no-result',
+    query: 'zzzz-no-relgeo-section-999',
+    expectedSectionIds: const <String>[],
+    expectsNoResults: true,
+  ),
+];
+
 class SourceProposal {
   const SourceProposal({
     required this.source,
@@ -428,6 +754,7 @@ class RenderResult {
 enum RelGeoResourceKind {
   specIndex,
   specRule,
+  specSection,
   examplesIndex,
   example,
   diagnosticsCatalog,
@@ -456,6 +783,16 @@ class RelGeoResourceUri {
         segments.length == 2 &&
         segments[0] == 'rules') {
       return RelGeoResourceUri._(RelGeoResourceKind.specRule, segments[1]);
+    }
+    if (parsed.host == 'spec' &&
+        segments.length == 2 &&
+        segments[0] == 'sections') {
+      // Uri.pathSegments already returns the decoded segment. Decode exactly
+      // once so anchors containing a literal percent sign remain round-trip
+      // safe through [RelGeoResourceUri.specSection].
+      final sectionId = segments[1];
+      SpecSectionId.parse(sectionId);
+      return RelGeoResourceUri._(RelGeoResourceKind.specSection, sectionId);
     }
     if (parsed.host == 'examples' && _matches(segments, ['index'])) {
       return const RelGeoResourceUri._(RelGeoResourceKind.examplesIndex, null);
@@ -488,6 +825,11 @@ class RelGeoResourceUri {
   factory RelGeoResourceUri.specRule(String ruleId) =>
       RelGeoResourceUri._(RelGeoResourceKind.specRule, _requiredId(ruleId));
 
+  factory RelGeoResourceUri.specSection(String sectionId) {
+    final parsed = SpecSectionId.parse(sectionId);
+    return RelGeoResourceUri._(RelGeoResourceKind.specSection, parsed.value);
+  }
+
   factory RelGeoResourceUri.examplesIndex() =>
       const RelGeoResourceUri._(RelGeoResourceKind.examplesIndex, null);
 
@@ -509,6 +851,8 @@ class RelGeoResourceUri {
         return 'relgeo://spec/index';
       case RelGeoResourceKind.specRule:
         return 'relgeo://spec/rules/${Uri.encodeComponent(id!)}';
+      case RelGeoResourceKind.specSection:
+        return 'relgeo://spec/sections/${Uri.encodeComponent(id!)}';
       case RelGeoResourceKind.examplesIndex:
         return 'relgeo://examples/index';
       case RelGeoResourceKind.example:
@@ -552,6 +896,7 @@ class RelGeoToolContract {
     required this.outputType,
     required this.inputSchema,
     this.requiresActiveDocument = false,
+    this.compatibilityAliases = const <String>[],
   });
 
   final String name;
@@ -561,6 +906,7 @@ class RelGeoToolContract {
   final String outputType;
   final Map<String, Object?> inputSchema;
   final bool requiresActiveDocument;
+  final List<String> compatibilityAliases;
 
   Map<String, Object?> toJson() => <String, Object?>{
     'name': name,
@@ -570,8 +916,73 @@ class RelGeoToolContract {
     'outputType': outputType,
     'inputSchema': inputSchema,
     'requiresActiveDocument': requiresActiveDocument,
+    if (compatibilityAliases.isNotEmpty)
+      'compatibilityAliases': compatibilityAliases,
   };
 }
+
+/// Catalog for the Plan 14 retrieval tools. It remains separate from
+/// [relGeoMvpToolContracts] so the adapter can advertise it conditionally only
+/// when a host supplies the pinned full-spec index.
+const relGeoSpecRetrievalToolContracts = <RelGeoToolContract>[
+  RelGeoToolContract(
+    name: 'relgeo_search_spec',
+    description:
+        'Search the complete pinned RelGeo Markdown spec snapshot by lexical relevance.',
+    access: McpToolAccess.readOnly,
+    inputType: 'SearchSpecInput',
+    outputType: 'SearchSpecResult',
+    compatibilityAliases: <String>['relgeo_find_syntax'],
+    inputSchema: <String, Object?>{
+      'type': 'object',
+      'additionalProperties': false,
+      'required': <String>['query'],
+      'properties': <String, Object?>{
+        'query': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'maxLength': 512,
+        },
+        'specVersion': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'default': relGeoMvpSpecVersion,
+        },
+        'maxResults': <String, Object?>{
+          'type': 'integer',
+          'minimum': 1,
+          'maximum': 32,
+          'default': 8,
+        },
+      },
+    },
+  ),
+  RelGeoToolContract(
+    name: 'relgeo_get_spec_section',
+    description:
+        'Read one complete section from the pinned RelGeo Markdown spec snapshot.',
+    access: McpToolAccess.readOnly,
+    inputType: 'GetSpecSectionInput',
+    outputType: 'GetSpecSectionResult',
+    inputSchema: <String, Object?>{
+      'type': 'object',
+      'additionalProperties': false,
+      'required': <String>['sectionId'],
+      'properties': <String, Object?>{
+        'sectionId': <String, Object?>{
+          'type': 'string',
+          'minLength': 3,
+          'pattern': r'^[^/].*\.md#[^#]+$',
+        },
+        'specVersion': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'default': relGeoMvpSpecVersion,
+        },
+      },
+    },
+  ),
+];
 
 const relGeoMvpToolContracts = <RelGeoToolContract>[
   RelGeoToolContract(
@@ -757,3 +1168,10 @@ const relGeoMvpResourceUris = <String>[
   'relgeo://document/active',
   'relgeo://document/active/diagnostics',
 ];
+
+/// Resource templates reserved for the full-spec adapter boundary.
+const relGeoSpecRetrievalResourceUris = <String>[
+  'relgeo://spec/index',
+];
+
+const relGeoSpecSectionResourceTemplate = 'relgeo://spec/sections/{sectionId}';
