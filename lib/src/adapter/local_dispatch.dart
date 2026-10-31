@@ -284,7 +284,7 @@ class RelGeoMcpToolDispatcher {
   static const Map<String, Object?> _capabilitiesTool = <String, Object?>{
     'name': 'relgeo_get_capabilities',
     'description':
-        'Report the read-only tools, resources, pinned spec snapshot, and limitations.',
+        'Report the available tools, resources, pinned spec snapshot, and limitations.',
     'inputSchema': <String, Object?>{
       'type': 'object',
       'additionalProperties': false,
@@ -292,35 +292,35 @@ class RelGeoMcpToolDispatcher {
     },
   };
 
-  static const Map<String, Object?> _specSearchCompatibilityAliasTool =
-      <String, Object?>{
-        'name': 'relgeo_find_syntax',
-        'description':
-            'Compatibility alias for searching the pinned local RelGeo specification.',
-        'inputSchema': <String, Object?>{
-          'type': 'object',
-          'additionalProperties': false,
-          'required': <String>['query'],
-          'properties': <String, Object?>{
-            'query': <String, Object?>{
-              'type': 'string',
-              'minLength': 1,
-              'maxLength': 512,
-            },
-            'specVersion': <String, Object?>{
-              'type': 'string',
-              'minLength': 1,
-              'default': relGeoMvpSpecVersion,
-            },
-            'maxResults': <String, Object?>{
-              'type': 'integer',
-              'minimum': 1,
-              'maximum': 32,
-              'default': 8,
-            },
-          },
+  static const Map<String, Object?>
+  _specSearchCompatibilityAliasTool = <String, Object?>{
+    'name': 'relgeo_find_syntax',
+    'description':
+        'Compatibility alias for searching the pinned local RelGeo specification.',
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'additionalProperties': false,
+      'required': <String>['query'],
+      'properties': <String, Object?>{
+        'query': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'maxLength': 512,
         },
-      };
+        'specVersion': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'default': relGeoMvpSpecVersion,
+        },
+        'maxResults': <String, Object?>{
+          'type': 'integer',
+          'minimum': 1,
+          'maximum': 32,
+          'default': 8,
+        },
+      },
+    },
+  };
 
   Map<String, Object?> capabilityMetadata() {
     final loaded = specIndex != null;
@@ -376,33 +376,33 @@ class RelGeoMcpToolDispatcher {
             throw _versionMismatch(error);
           }
         }
-        return (await _requireHandlers(name).findSyntax(
-          _findSyntax(rawArguments),
-        )).toJson();
+        return (await _requireHandlers(
+          name,
+        ).findSyntax(_findSyntax(rawArguments))).toJson();
       case 'relgeo_get_syntax_rule':
-        return (await _requireHandlers(name).getSyntaxRule(
-          _getSyntaxRule(rawArguments),
-        )).toJson();
+        return (await _requireHandlers(
+          name,
+        ).getSyntaxRule(_getSyntaxRule(rawArguments))).toJson();
       case 'relgeo_get_examples':
-        return (await _requireHandlers(name).getExamples(
-          _getExamples(rawArguments),
-        )).toJson();
+        return (await _requireHandlers(
+          name,
+        ).getExamples(_getExamples(rawArguments))).toJson();
       case 'relgeo_complete_source':
-        return (await _requireHandlers(name).completeSource(
-          _completeSource(rawArguments),
-        )).toJson();
+        return (await _requireHandlers(
+          name,
+        ).completeSource(_completeSource(rawArguments))).toJson();
       case 'relgeo_validate_source':
-        return (await _requireHandlers(name).validateSource(
-          _validateSource(rawArguments),
-        )).toJson();
+        return (await _requireHandlers(
+          name,
+        ).validateSource(_validateSource(rawArguments))).toJson();
       case 'relgeo_explain_diagnostic':
-        return (await _requireHandlers(name).explainDiagnostic(
-          _explainDiagnostic(rawArguments),
-        )).toJson();
+        return (await _requireHandlers(
+          name,
+        ).explainDiagnostic(_explainDiagnostic(rawArguments))).toJson();
       case 'relgeo_render_source':
-        return (await _requireHandlers(name).renderSource(
-          _renderSource(rawArguments),
-        )).toJson();
+        return (await _requireHandlers(
+          name,
+        ).renderSource(_renderSource(rawArguments))).toJson();
       default:
         throw McpDispatchException(
           -32601,
@@ -721,6 +721,7 @@ class RelGeoMcpJsonRpcRouter {
   RelGeoMcpJsonRpcRouter({
     this.dispatcher,
     this.activeBridge,
+    this.allowDocumentEdits = false,
     required this.resources,
   });
 
@@ -732,6 +733,7 @@ class RelGeoMcpJsonRpcRouter {
 
   final RelGeoMcpToolDispatcher? dispatcher;
   final RelGeoAgentBridge? activeBridge;
+  final bool allowDocumentEdits;
   final RelGeoMcpResourceStore resources;
   bool _initialized = false;
   String? _negotiatedProtocolVersion;
@@ -799,8 +801,9 @@ class RelGeoMcpJsonRpcRouter {
         result: <String, Object?>{
           'protocolVersion': _negotiatedProtocolVersion!,
           if (activeBridge != null)
-            'instructions':
-                'RelGeo MCP is a read-only desktop preview. For syntax and how-to questions, use the full local spec search when its snapshot is loaded, then retrieve the complete section before answering. Treat spec results as normative. You may then call relgeo_get_examples for an illustrative snippet, clearly labeled as an example. Use relgeo_get_active_document to inspect the open document. It cannot create or edit drawings.',
+            'instructions': allowDocumentEdits
+                ? 'RelGeo MCP is connected to the active desktop document. For syntax and how-to questions, search the bundled full spec and retrieve the complete normative section before answering. Use relgeo_get_examples only as an illustration. Use relgeo_apply_document_edit only when the user explicitly asks to create or change the active drawing; use the latest document ID and revision, make one bounded patch, and report the result. Edits are undoable and are not saved automatically.'
+                : 'RelGeo MCP is a read-only desktop connection. For syntax and how-to questions, search the bundled full spec and retrieve the complete normative section before answering. Use relgeo_get_examples only as an illustration. Use relgeo_get_active_document to inspect the open document. Document edits are disabled until the user enables them in the RelGeo MCP dialog.',
           'capabilities': <String, Object?>{
             'tools': <String, Object?>{'listChanged': false},
             'resources': <String, Object?>{
@@ -828,7 +831,8 @@ class RelGeoMcpJsonRpcRouter {
       switch (method) {
         case 'tools/list':
           final toolDispatcher = dispatcher;
-          final exposeDesktopExamples = activeBridge != null &&
+          final exposeDesktopExamples =
+              activeBridge != null &&
               (toolDispatcher == null || toolDispatcher.handlers == null);
           return _response(
             hasId,
@@ -843,11 +847,14 @@ class RelGeoMcpJsonRpcRouter {
                             _getSyntaxRuleTool,
                             _examplesTool,
                             ..._activeDocumentTools,
+                            if (allowDocumentEdits) _applyDocumentEditTool,
                           ])
                   : <Map<String, Object?>>[
                       ...toolDispatcher.listTools(),
                       if (exposeDesktopExamples) _examplesTool,
                       if (activeBridge != null) ..._activeDocumentTools,
+                      if (activeBridge != null && allowDocumentEdits)
+                        _applyDocumentEditTool,
                     ],
             },
           );
@@ -870,7 +877,29 @@ class RelGeoMcpJsonRpcRouter {
           late final Map<String, Object?> output;
           if (toolDispatcher == null && name == 'relgeo_get_capabilities') {
             _requireNoArguments(params['arguments'], 'relgeo_get_capabilities');
-            output = _capabilities;
+            output = <String, Object?>{
+              ..._capabilities,
+              'mode': allowDocumentEdits
+                  ? 'desktop connected with document edits enabled'
+                  : 'read-only desktop connection',
+              if (allowDocumentEdits)
+                'tools': <Map<String, String>>[
+                  ...(_capabilities['tools'] as List<Map<String, String>>),
+                  <String, String>{
+                    'name': 'relgeo_apply_document_edit',
+                    'description':
+                        'Apply one bounded, undoable patch to the active document.',
+                  },
+                ],
+              'limitations': <String>[
+                ...(_capabilities['limitations'] as List<String>).where(
+                  (item) => item != 'Cannot create or edit drawings.',
+                ),
+                if (!allowDocumentEdits)
+                  'Document edits are disabled until explicitly enabled in the desktop MCP dialog.',
+                'Document changes apply only to the active source, are undoable, and are never saved automatically.',
+              ],
+            };
           } else if (toolDispatcher == null &&
               name == 'relgeo_find_syntax' &&
               activeBridge != null) {
@@ -883,6 +912,10 @@ class RelGeoMcpJsonRpcRouter {
               name == 'relgeo_get_examples' &&
               activeBridge != null) {
             output = _getDesktopExamples(params['arguments']);
+          } else if (name == 'relgeo_apply_document_edit' &&
+              activeBridge != null &&
+              allowDocumentEdits) {
+            output = await _applyDesktopDocumentEdit(params['arguments']);
           } else if (name == 'relgeo_get_examples' &&
               activeBridge != null &&
               (toolDispatcher == null || toolDispatcher.handlers == null)) {
@@ -894,10 +927,22 @@ class RelGeoMcpJsonRpcRouter {
               final toolNames = <Object?>[
                 ...(metadata['tools'] as List<Object?>),
                 'relgeo_get_examples',
+                if (allowDocumentEdits) 'relgeo_apply_document_edit',
               ];
               output = <String, Object?>{
                 ...metadata,
+                'mode': allowDocumentEdits
+                    ? 'desktop connected with document edits enabled'
+                    : 'read-only desktop connection',
                 'tools': toolNames,
+                'limitations': <String>[
+                  ...(metadata['limitations'] as List<String>).where(
+                    (item) => item != 'Cannot create or edit drawings.',
+                  ),
+                  if (!allowDocumentEdits)
+                    'Document edits are disabled until explicitly enabled in the desktop MCP dialog.',
+                  'Edits apply only to the active document, are bounded and undoable, and are never saved automatically.',
+                ],
               };
             } else {
               output = metadata;
@@ -1010,6 +1055,60 @@ class RelGeoMcpJsonRpcRouter {
     },
   ];
 
+  static const Map<String, Object?> _applyDocumentEditTool = <String, Object?>{
+    'name': 'relgeo_apply_document_edit',
+    'description':
+        'Apply one bounded patch to the active RelGeo document. Use only when the user explicitly asks to create or change the drawing. Read the latest document ID and revision first. The change is one undoable editor transaction and is not saved automatically.',
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'additionalProperties': false,
+      'required': <String>[
+        'baseDocumentId',
+        'baseRevision',
+        'summary',
+        'edits',
+      ],
+      'properties': <String, Object?>{
+        'baseDocumentId': <String, Object?>{'type': 'string', 'minLength': 1},
+        'baseRevision': <String, Object?>{'type': 'integer', 'minimum': 0},
+        'summary': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'maxLength': DocumentEditBounds.maxSummaryCodeUnits,
+        },
+        'rationale': <String, Object?>{
+          'type': 'string',
+          'maxLength': DocumentEditBounds.maxRationaleCodeUnits,
+        },
+        'edits': <String, Object?>{
+          'type': 'array',
+          'minItems': 1,
+          'maxItems': DocumentEditBounds.maxEdits,
+          'items': <String, Object?>{
+            'type': 'object',
+            'additionalProperties': false,
+            'required': <String>['range', 'replacement'],
+            'properties': <String, Object?>{
+              'range': <String, Object?>{
+                'type': 'object',
+                'additionalProperties': false,
+                'required': <String>['start', 'end'],
+                'properties': <String, Object?>{
+                  'start': <String, Object?>{'type': 'integer', 'minimum': 0},
+                  'end': <String, Object?>{'type': 'integer', 'minimum': 0},
+                },
+              },
+              'replacement': <String, Object?>{
+                'type': 'string',
+                'maxLength': DocumentEditBounds.maxReplacementCodeUnits,
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
   static const Map<String, Object?> _capabilities = <String, Object?>{
     'server': 'relgeo-mcp',
     'mode': 'read-only desktop preview',
@@ -1052,7 +1151,7 @@ class RelGeoMcpJsonRpcRouter {
   static const Map<String, Object?> _capabilitiesTool = <String, Object?>{
     'name': 'relgeo_get_capabilities',
     'description':
-        'Use this tool when asked what RelGeo MCP can do. It reports available tools, resources, and limitations.',
+        'Use this tool when asked what RelGeo MCP can do. It reports available tools, resources, and limitations for the current permission mode.',
     'inputSchema': <String, Object?>{
       'type': 'object',
       'additionalProperties': false,
@@ -1290,6 +1389,104 @@ objects:
       query: query,
       matches: const <SyntaxMatch>[],
     ).toJson();
+  }
+
+  Future<Map<String, Object?>> _applyDesktopDocumentEdit(
+    Object? rawArguments,
+  ) async {
+    final arguments = _desktopArguments(
+      rawArguments,
+      'relgeo_apply_document_edit',
+    );
+    _rejectDesktopArguments(arguments, const <String>{
+      'baseDocumentId',
+      'baseRevision',
+      'summary',
+      'rationale',
+      'edits',
+    }, 'relgeo_apply_document_edit');
+    final documentId = arguments['baseDocumentId'];
+    if (documentId is! String || documentId.isEmpty) {
+      throw const McpDispatchException(
+        -32602,
+        'baseDocumentId must be a non-empty string',
+      );
+    }
+    final revision = arguments['baseRevision'];
+    if (revision is! int || revision < 0) {
+      throw const McpDispatchException(
+        -32602,
+        'baseRevision must be a non-negative integer',
+      );
+    }
+    final summary = arguments['summary'];
+    if (summary is! String || summary.isEmpty) {
+      throw const McpDispatchException(
+        -32602,
+        'summary must be a non-empty string',
+      );
+    }
+    final rationale = arguments['rationale'];
+    if (rationale != null && rationale is! String) {
+      throw const McpDispatchException(-32602, 'rationale must be a string');
+    }
+    final rawEdits = arguments['edits'];
+    if (rawEdits is! List ||
+        rawEdits.isEmpty ||
+        rawEdits.length > DocumentEditBounds.maxEdits) {
+      throw const McpDispatchException(
+        -32602,
+        'edits must contain between 1 and 64 patches',
+      );
+    }
+    final edits = <DocumentEdit>[];
+    for (final rawEdit in rawEdits) {
+      if (rawEdit is! Map || rawEdit.keys.any((key) => key is! String)) {
+        throw const McpDispatchException(-32602, 'each edit must be an object');
+      }
+      final edit = Map<String, Object?>.from(rawEdit.cast<String, Object?>());
+      _rejectDesktopArguments(edit, const <String>{
+        'range',
+        'replacement',
+      }, 'edit');
+      final rawRange = edit['range'];
+      if (rawRange is! Map || rawRange.keys.any((key) => key is! String)) {
+        throw const McpDispatchException(
+          -32602,
+          'edit.range must be an object',
+        );
+      }
+      final range = Map<String, Object?>.from(rawRange.cast<String, Object?>());
+      _rejectDesktopArguments(range, const <String>{'start', 'end'}, 'range');
+      final start = range['start'];
+      final end = range['end'];
+      final replacement = edit['replacement'];
+      if (start is! int || start < 0 || end is! int || end < start) {
+        throw const McpDispatchException(-32602, 'edit range is invalid');
+      }
+      if (replacement is! String) {
+        throw const McpDispatchException(
+          -32602,
+          'edit.replacement must be a string',
+        );
+      }
+      edits.add(
+        DocumentEdit(
+          range: SourceRange(start: start, end: end),
+          replacement: replacement,
+        ),
+      );
+    }
+    final result = await activeBridge!.applyDocumentEdit(
+      DocumentEditProposal(
+        baseDocumentId: documentId,
+        baseRevision: revision,
+        summary: summary,
+        rationale: rationale as String?,
+        edits: edits,
+      ),
+    );
+    return result.toJson();
   }
 
   static Map<String, Object?> _getDesktopSyntaxRule(Object? rawArguments) {

@@ -366,27 +366,27 @@ Rect uses width and height.''',
               ),
         ),
       );
-    await expectLater(
-      dispatcher.call('relgeo_get_spec_section', {
-        'sectionId': 'geometry/14-geometry-objects.md#143-rect',
-        'specVersion': '0.6',
-      }),
-      throwsA(isA<McpDispatchException>()),
-    );
-    await expectLater(
-      dispatcher.call('relgeo_get_spec_section', {
-        'sectionId': 'geometry/missing.md#missing',
-      }),
-      throwsA(
-        isA<McpDispatchException>()
-            .having((error) => error.code, 'code', -32004)
-            .having(
-              (error) => error.data?['sectionId'],
-              'section id',
-              'geometry/missing.md#missing',
-            ),
-      ),
-    );
+      await expectLater(
+        dispatcher.call('relgeo_get_spec_section', {
+          'sectionId': 'geometry/14-geometry-objects.md#143-rect',
+          'specVersion': '0.6',
+        }),
+        throwsA(isA<McpDispatchException>()),
+      );
+      await expectLater(
+        dispatcher.call('relgeo_get_spec_section', {
+          'sectionId': 'geometry/missing.md#missing',
+        }),
+        throwsA(
+          isA<McpDispatchException>()
+              .having((error) => error.code, 'code', -32004)
+              .having(
+                (error) => error.data?['sectionId'],
+                'section id',
+                'geometry/missing.md#missing',
+              ),
+        ),
+      );
 
       final store = RelGeoMcpResourceStore(specIndex: specIndex);
       expect(store.listResources(includeUnavailable: false), hasLength(1));
@@ -412,83 +412,94 @@ Rect uses width and height.''',
     },
   );
 
-  test('spec-only dispatcher advertises only loaded retrieval capabilities', () {
-    final dispatcher = RelGeoMcpToolDispatcher(null, specIndex: specIndex);
-    final names = dispatcher.listTools().map((tool) => tool['name']);
+  test(
+    'spec-only dispatcher advertises only loaded retrieval capabilities',
+    () {
+      final dispatcher = RelGeoMcpToolDispatcher(null, specIndex: specIndex);
+      final names = dispatcher.listTools().map((tool) => tool['name']);
 
-    expect(
-      names,
-      containsAll(<String>[
-        'relgeo_get_capabilities',
-        'relgeo_search_spec',
-        'relgeo_get_spec_section',
-        'relgeo_find_syntax',
-      ]),
-    );
-    expect(names, isNot(contains('relgeo_validate_source')));
-  });
+      expect(
+        names,
+        containsAll(<String>[
+          'relgeo_get_capabilities',
+          'relgeo_search_spec',
+          'relgeo_get_spec_section',
+          'relgeo_find_syntax',
+        ]),
+      );
+      expect(names, isNot(contains('relgeo_validate_source')));
+    },
+  );
 
-  test('desktop bridge keeps examples separate from normative retrieval', () async {
-    final router = RelGeoMcpJsonRpcRouter(
-      dispatcher: RelGeoMcpToolDispatcher(null, specIndex: specIndex),
-      activeBridge: _Bridge(),
-      resources: RelGeoMcpResourceStore(
+  test(
+    'desktop bridge keeps examples separate from normative retrieval',
+    () async {
+      final router = RelGeoMcpJsonRpcRouter(
+        dispatcher: RelGeoMcpToolDispatcher(null, specIndex: specIndex),
         activeBridge: _Bridge(),
-        specIndex: specIndex,
-      ),
-    );
-    await router.handle(<String, Object?>{
-      'jsonrpc': '2.0',
-      'id': 1,
-      'method': 'initialize',
-      'params': <String, Object?>{
-        'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
-      },
-    });
-    await router.handle(<String, Object?>{
-      'jsonrpc': '2.0',
-      'method': 'notifications/initialized',
-    });
+        resources: RelGeoMcpResourceStore(
+          activeBridge: _Bridge(),
+          specIndex: specIndex,
+        ),
+      );
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'initialize',
+        'params': <String, Object?>{
+          'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
+        },
+      });
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'method': 'notifications/initialized',
+      });
 
-    final tools = await router.handle(<String, Object?>{
-      'jsonrpc': '2.0',
-      'id': 2,
-      'method': 'tools/list',
-    });
-    expect(
-      ((tools?['result'] as Map)['tools'] as List)
-          .map((tool) => (tool as Map)['name']),
-      contains('relgeo_get_examples'),
-    );
+      final tools = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 2,
+        'method': 'tools/list',
+      });
+      expect(
+        ((tools?['result'] as Map)['tools'] as List).map(
+          (tool) => (tool as Map)['name'],
+        ),
+        contains('relgeo_get_examples'),
+      );
 
-    final examples = await router.handle(<String, Object?>{
-      'jsonrpc': '2.0',
-      'id': 3,
-      'method': 'tools/call',
-      'params': <String, Object?>{
-        'name': 'relgeo_get_examples',
-        'arguments': <String, Object?>{'query': 'square'},
-      },
-    });
-    final example = (((examples?['result'] as Map)['structuredContent']
-        as Map)['examples'] as List).single as Map;
-    expect((example['provenance'] as Map)['source'], 'example');
-    expect((example['provenance'] as Map)['normative'], isFalse);
+      final examples = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 3,
+        'method': 'tools/call',
+        'params': <String, Object?>{
+          'name': 'relgeo_get_examples',
+          'arguments': <String, Object?>{'query': 'square'},
+        },
+      });
+      final example =
+          (((examples?['result'] as Map)['structuredContent']
+                          as Map)['examples']
+                      as List)
+                  .single
+              as Map;
+      expect((example['provenance'] as Map)['source'], 'example');
+      expect((example['provenance'] as Map)['normative'], isFalse);
 
-    final capabilities = await router.handle(<String, Object?>{
-      'jsonrpc': '2.0',
-      'id': 4,
-      'method': 'tools/call',
-      'params': <String, Object?>{
-        'name': 'relgeo_get_capabilities',
-        'arguments': const <String, Object?>{},
-      },
-    });
-    expect(
-      ((capabilities?['result'] as Map)['structuredContent'] as Map)['tools'],
-      contains('relgeo_get_examples'),
-    );
-  });
+      final capabilities = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 4,
+        'method': 'tools/call',
+        'params': <String, Object?>{
+          'name': 'relgeo_get_capabilities',
+          'arguments': const <String, Object?>{},
+        },
+      });
+      expect(
+        ((capabilities?['result'] as Map)['structuredContent'] as Map)['tools'],
+        contains('relgeo_get_examples'),
+      );
+    },
+  );
 
   test(
     'JSON-RPC full-spec boundary exposes tools, resources, and errors',
@@ -584,6 +595,65 @@ Rect uses width and height.''',
       expect(
         (templates.single as Map)['uriTemplate'],
         relGeoSpecSectionResourceTemplate,
+      );
+    },
+  );
+
+  test(
+    'document edit tool is opt-in and applies through the active bridge',
+    () async {
+      final router = RelGeoMcpJsonRpcRouter(
+        activeBridge: _Bridge(),
+        allowDocumentEdits: true,
+        resources: RelGeoMcpResourceStore(activeBridge: _Bridge()),
+      );
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'initialize',
+        'params': <String, Object?>{
+          'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
+        },
+      });
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'method': 'notifications/initialized',
+      });
+
+      final listed = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 2,
+        'method': 'tools/list',
+      });
+      expect(
+        ((listed?['result'] as Map)['tools'] as List).cast<Map>().map(
+          (tool) => tool['name'],
+        ),
+        contains('relgeo_apply_document_edit'),
+      );
+
+      final applied = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 3,
+        'method': 'tools/call',
+        'params': <String, Object?>{
+          'name': 'relgeo_apply_document_edit',
+          'arguments': <String, Object?>{
+            'baseDocumentId': 'doc-1',
+            'baseRevision': 3,
+            'summary': 'Replace a source token',
+            'edits': <Object?>[
+              <String, Object?>{
+                'range': <String, Object?>{'start': 9, 'end': 11},
+                'replacement': '[]',
+              },
+            ],
+          },
+        },
+      });
+      expect(
+        ((applied?['result'] as Map)['structuredContent'] as Map)['status'],
+        'rejected',
       );
     },
   );

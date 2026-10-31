@@ -8,7 +8,8 @@ session bridge. It deliberately has no Flutter, widget, filesystem, or socket
 transport dependency. The Flutter desktop host owns the local HTTP listener
 and supplies the active-document bridge.
 
-This package currently defines the session/security boundary spike:
+This package defines the session/security boundary and protocol-independent MCP
+tool/resource contracts:
 
 - `ActiveDocumentSnapshot` is the read boundary for the active document;
 - `DocumentEditProposal` is a bounded, range-based patch guarded by
@@ -20,12 +21,15 @@ This package currently defines the session/security boundary spike:
   no-autosave defaults.
 - `mcp_schema.dart` defines the typed MVP tool/resource contract, bounded
   inputs, source proposals, validation results, diagnostics, and provenance.
-- `local_dispatch.dart` provides typed seven-tool dispatch, desktop preview
-  dispatch for capability/syntax/example/document reads, canonical resource
-  list/read, and a transport-independent JSON-RPC router. Owner callbacks are
+- `local_dispatch.dart` provides typed tool dispatch, full-spec search and
+  section retrieval from a pinned in-memory index, desktop capability/example/
+  active-document reads, and the opt-in bounded active-document edit route.
+  Owner callbacks are
   injected so this package does not duplicate core, language-service, or
-  renderer semantics. Desktop syntax guidance is currently a small local
-  preview index, not a complete `spec/id` search.
+  renderer semantics. Desktop hosts supply the complete offline `spec/id`
+  search index. Edit authorization is enforced by the desktop host's
+  read-write token; the router exposes the edit tool only when the user enables
+  editing in Flutter.
 
 The package does not select an MCP SDK or implement socket transport. The
 router is the SDK-neutral boundary; HTTP framing and host lifecycle are owned

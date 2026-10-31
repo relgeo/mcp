@@ -278,8 +278,8 @@ void main() {
       expect((section.inputSchema['required'] as List), contains('sectionId'));
       expect(relGeoSpecRetrievalResourceUris, contains('relgeo://spec/index'));
       expect(
-        relGeoSpecRetrievalResourceUris,
-        contains('relgeo://spec/sections/{sectionId}'),
+        relGeoSpecSectionResourceTemplate,
+        'relgeo://spec/sections/{sectionId}',
       );
       expect(relGeoSpecSearchFixtures, hasLength(5));
       expect(
