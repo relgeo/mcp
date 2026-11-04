@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:relgeo_mcp/relgeo_mcp.dart';
 import 'package:test/test.dart';
 
@@ -16,7 +19,11 @@ const _specSnapshot = SpecSnapshotMetadata(
   fileCount: 1,
 );
 
-RelGeoMcpToolHandlers _handlers() => RelGeoMcpToolHandlers(
+RelGeoMcpToolHandlers _handlers({
+  GetExamplesHandler? getExamples,
+  ValidateSourceHandler? validateSource,
+  RenderSourceHandler? renderSource,
+}) => RelGeoMcpToolHandlers(
   findSyntax: (input) => FindSyntaxResult(
     query: input.query,
     matches: <SyntaxMatch>[
@@ -40,25 +47,29 @@ RelGeoMcpToolHandlers _handlers() => RelGeoMcpToolHandlers(
       ),
     ),
   ),
-  getExamples: (input) => ExamplesResult(
-    examples: <ExampleResult>[
-      ExampleResult(
-        exampleId: input.exampleId ?? 'objects-minimal',
-        title: 'Minimal objects',
-        source: 'objects: {}',
+  getExamples:
+      getExamples ??
+      (input) => ExamplesResult(
+        examples: <ExampleResult>[
+          ExampleResult(
+            exampleId: input.exampleId ?? 'objects-minimal',
+            title: 'Minimal objects',
+            source: 'objects: {}',
+            provenance: _specProvenance,
+          ),
+        ],
+      ),
+  completeSource: (_) => const CompletionResult(items: <CompletionProposal>[]),
+  validateSource:
+      validateSource ??
+      (input) => ValidationResult(
+        source: input.source,
+        sourceKind: input.sourceKind,
+        valid: true,
+        specVersion: input.specVersion,
+        diagnostics: const <RelGeoDiagnostic>[],
         provenance: _specProvenance,
       ),
-    ],
-  ),
-  completeSource: (_) => const CompletionResult(items: <CompletionProposal>[]),
-  validateSource: (input) => ValidationResult(
-    source: input.source,
-    sourceKind: input.sourceKind,
-    valid: true,
-    specVersion: input.specVersion,
-    diagnostics: const <RelGeoDiagnostic>[],
-    provenance: _specProvenance,
-  ),
   explainDiagnostic: (_) => const DiagnosticExplanationResult(
     documentation: DocumentationResult(
       title: 'Diagnostic',
@@ -71,11 +82,13 @@ RelGeoMcpToolHandlers _handlers() => RelGeoMcpToolHandlers(
       ),
     ),
   ),
-  renderSource: (_) => const RenderResult(
-    format: RenderFormat.svg,
-    content: '<svg />',
-    provenance: _specProvenance,
-  ),
+  renderSource:
+      renderSource ??
+      (_) => const RenderResult(
+        format: RenderFormat.svg,
+        content: '<svg />',
+        provenance: _specProvenance,
+      ),
 );
 
 class _Bridge implements RelGeoAgentBridge {
@@ -103,6 +116,69 @@ class _Bridge implements RelGeoAgentBridge {
   Future<DocumentEditResult> applyDocumentEdit(
     DocumentEditProposal proposal,
   ) async => DocumentEditResult.rejected(message: proposal.summary);
+
+  @override
+  Future<DocumentEditResult> applyDocumentEditGuarded(
+    DocumentEditProposal proposal,
+    McpCancellationToken cancellation,
+  ) async {
+    cancellation.throwIfCancelled();
+    return applyDocumentEdit(proposal);
+  }
+
+  @override
+  Future<DocumentEditResult> reviewDocumentEdit(
+    DocumentEditProposal proposal,
+  ) async => DocumentEditResult.review(
+    proposal: proposal,
+    snapshot: (await getActiveDocument())!,
+  );
+}
+
+class _CancellableBridge implements RelGeoAgentBridge {
+  _CancellableBridge(this.gate);
+
+  final Completer<void> gate;
+  bool committed = false;
+
+  @override
+  Future<ActiveDocumentSnapshot?> getActiveDocument() async =>
+      const ActiveDocumentSnapshot(
+        documentId: 'doc-1',
+        name: 'active.relgeo',
+        source: 'objects: {}',
+        revision: 3,
+        dirty: true,
+      );
+
+  @override
+  Future<List<DocumentDiagnostic>> getDiagnostics() async =>
+      const <DocumentDiagnostic>[];
+
+  @override
+  Future<DocumentEditResult> applyDocumentEdit(
+    DocumentEditProposal proposal,
+  ) async => DocumentEditResult.applied(newRevision: 4);
+
+  @override
+  Future<DocumentEditResult> applyDocumentEditGuarded(
+    DocumentEditProposal proposal,
+    McpCancellationToken cancellation,
+  ) async {
+    cancellation.throwIfCancelled();
+    await gate.future;
+    cancellation.throwIfCancelled();
+    committed = true;
+    return DocumentEditResult.applied(newRevision: 4);
+  }
+
+  @override
+  Future<DocumentEditResult> reviewDocumentEdit(
+    DocumentEditProposal proposal,
+  ) async => DocumentEditResult.review(
+    proposal: proposal,
+    snapshot: (await getActiveDocument())!,
+  );
 }
 
 void main() {
@@ -145,6 +221,70 @@ Rect uses width and height.''',
     },
   );
 
+  test('dispatcher echoes document identity on editor results', () async {
+    final dispatcher = RelGeoMcpToolDispatcher(_handlers());
+    final result = await dispatcher.call('relgeo_validate_source', {
+      'source': 'objects: {}',
+      'identity': <String, Object?>{
+        'documentId': 'editor-1',
+        'version': 3,
+        'requestId': 'validate-3',
+      },
+    });
+
+    expect(result['identity'], <String, Object>{
+      'protocolVersion': '0.2',
+      'documentId': 'editor-1',
+      'version': 3,
+      'requestId': 'validate-3',
+      'specVersion': '0.5',
+      'positionEncoding': 'utf-16',
+    });
+  });
+
+  test('bounded authoring workflow preserves the owner chain', () async {
+    final dispatcher = RelGeoMcpToolDispatcher(_handlers());
+
+    final discovery = await dispatcher.call('relgeo_find_syntax', {
+      'query': 'rectangle',
+      'maxResults': 4,
+    });
+    final example = await dispatcher.call('relgeo_get_examples', {
+      'exampleId': 'objects-minimal',
+      'maxResults': 1,
+    });
+    final completion = await dispatcher.call('relgeo_complete_source', {
+      'source': 'objects: {}',
+      'position': <String, Object?>{'line': 0, 'character': 8},
+      'maxResults': 4,
+    });
+    final validation = await dispatcher.call('relgeo_validate_source', {
+      'source': 'objects: {}',
+      'sourceKind': 'proposal',
+    });
+    final explanation = await dispatcher.call('relgeo_explain_diagnostic', {
+      'code': 'RG001',
+    });
+    final render = await dispatcher.call('relgeo_render_source', {
+      'source': 'objects: {}',
+    });
+
+    expect((discovery['matches'] as List), isNotEmpty);
+    expect((example['examples'] as List), hasLength(1));
+    expect(completion['items'], isA<List<Object?>>());
+    expect(validation['sourceKind'], 'proposal');
+    expect(
+      ((validation['provenance'] as Map)['revision']),
+      'test-spec-revision',
+    );
+    expect(
+      ((explanation['documentation'] as Map)['provenance'] as Map)['source'],
+      'spec',
+    );
+    expect(render['format'], 'svg');
+    expect((render['provenance'] as Map)['revision'], 'test-spec-revision');
+  });
+
   test('dispatcher rejects invalid arguments before invoking owners', () async {
     final dispatcher = RelGeoMcpToolDispatcher(_handlers());
 
@@ -183,6 +323,74 @@ Rect uses width and height.''',
       throwsA(isA<McpDispatchException>()),
     );
   });
+
+  test(
+    'read-only executors reject owner results outside bounds or provenance',
+    () async {
+      final oversizedExamples = RelGeoMcpToolDispatcher(
+        _handlers(
+          getExamples: (input) => ExamplesResult(
+            examples: List<ExampleResult>.generate(
+              input.maxResults + 1,
+              (index) => ExampleResult(
+                exampleId: 'example-$index',
+                title: 'Example $index',
+                source: 'version: 0.5',
+                provenance: _specProvenance,
+              ),
+            ),
+          ),
+        ),
+      );
+      await expectLater(
+        oversizedExamples.call('relgeo_get_examples', <String, Object?>{
+          'query': 'rect',
+          'maxResults': 1,
+        }),
+        throwsA(
+          isA<McpDispatchException>()
+              .having((error) => error.code, 'code', -32005)
+              .having(
+                (error) => error.data?['category'],
+                'category',
+                'owner-bounds',
+              ),
+        ),
+      );
+
+      final wrongRevision = RelGeoMcpToolDispatcher(
+        _handlers(
+          validateSource: (input) => ValidationResult(
+            source: input.source,
+            sourceKind: input.sourceKind,
+            valid: true,
+            specVersion: input.specVersion,
+            diagnostics: const <RelGeoDiagnostic>[],
+            provenance: const McpProvenance(
+              source: McpProvenanceSource.core,
+              sourceUrl: 'package:core',
+              specVersion: '0.6',
+              revision: 'different-revision',
+            ),
+          ),
+        ),
+      );
+      await expectLater(
+        wrongRevision.call('relgeo_validate_source', <String, Object?>{
+          'source': 'objects: {}',
+        }),
+        throwsA(
+          isA<McpDispatchException>()
+              .having((error) => error.code, 'code', -32005)
+              .having(
+                (error) => error.data?['category'],
+                'category',
+                'owner-contract',
+              ),
+        ),
+      );
+    },
+  );
 
   test(
     'JSON-RPC router owns initialize, discovery, call, and read flow',
@@ -658,6 +866,164 @@ Rect uses width and height.''',
     },
   );
 
+  test(
+    'review proposed patch is read-only and preserves the proposal',
+    () async {
+      final bridge = _Bridge();
+      final router = RelGeoMcpJsonRpcRouter(
+        activeBridge: bridge,
+        allowDocumentEdits: true,
+        resources: RelGeoMcpResourceStore(activeBridge: bridge),
+      );
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'initialize',
+        'params': <String, Object?>{
+          'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
+        },
+      });
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'method': 'notifications/initialized',
+      });
+
+      final response = await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 2,
+        'method': 'tools/call',
+        'params': <String, Object?>{
+          'name': 'relgeo_review_proposed_patch',
+          'arguments': <String, Object?>{
+            'baseDocumentId': 'doc-1',
+            'baseRevision': 3,
+            'summary': 'Review a source token',
+            'edits': <Object?>[
+              <String, Object?>{
+                'range': <String, Object?>{'start': 9, 'end': 11},
+                'replacement': '[]',
+              },
+            ],
+          },
+        },
+      });
+      final output = ((response?['result'] as Map)['structuredContent'] as Map);
+      expect(output['status'], 'review');
+      expect((output['proposal'] as Map)['summary'], 'Review a source token');
+      expect((output['snapshot'] as Map)['revision'], 3);
+    },
+  );
+
+  test('cancelled edit cannot commit after the abort boundary', () async {
+    final gate = Completer<void>();
+    final bridge = _CancellableBridge(gate);
+    final router = RelGeoMcpJsonRpcRouter(
+      activeBridge: bridge,
+      allowDocumentEdits: true,
+      resources: RelGeoMcpResourceStore(activeBridge: bridge),
+    );
+    await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'initialize',
+      'params': <String, Object?>{
+        'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
+      },
+    });
+    await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'method': 'notifications/initialized',
+    });
+
+    final pending = router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 7,
+      'method': 'tools/call',
+      'params': <String, Object?>{
+        'name': 'relgeo_apply_document_edit',
+        'arguments': <String, Object?>{
+          'baseDocumentId': 'doc-1',
+          'baseRevision': 3,
+          'summary': 'Cancelled change',
+          'edits': <Object?>[
+            <String, Object?>{
+              'range': <String, Object?>{'start': 9, 'end': 11},
+              'replacement': '[]',
+            },
+          ],
+        },
+      },
+    });
+    await Future<void>.delayed(Duration.zero);
+    await router.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'method': 'notifications/cancelled',
+      'params': <String, Object?>{
+        'requestId': 7,
+        'reason': 'client disconnected',
+      },
+    });
+    gate.complete();
+
+    final response = await pending;
+    expect((response?['error'] as Map)['code'], -32800);
+    expect((response?['error'] as Map)['data'], <String, Object?>{
+      'category': 'request-cancelled',
+    });
+    expect(bridge.committed, isFalse);
+  });
+
+  test(
+    'stopping the router cancels pending edits before they commit',
+    () async {
+      final gate = Completer<void>();
+      final bridge = _CancellableBridge(gate);
+      final router = RelGeoMcpJsonRpcRouter(
+        activeBridge: bridge,
+        allowDocumentEdits: true,
+        resources: RelGeoMcpResourceStore(activeBridge: bridge),
+      );
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'initialize',
+        'params': <String, Object?>{
+          'protocolVersion': RelGeoMcpJsonRpcRouter.protocolVersion,
+        },
+      });
+      await router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'method': 'notifications/initialized',
+      });
+      final pending = router.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 8,
+        'method': 'tools/call',
+        'params': <String, Object?>{
+          'name': 'relgeo_apply_document_edit',
+          'arguments': <String, Object?>{
+            'baseDocumentId': 'doc-1',
+            'baseRevision': 3,
+            'summary': 'Stopped change',
+            'edits': <Object?>[
+              <String, Object?>{
+                'range': <String, Object?>{'start': 9, 'end': 11},
+                'replacement': '[]',
+              },
+            ],
+          },
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+      router.cancelPendingRequests();
+      gate.complete();
+
+      final response = await pending;
+      expect((response?['error'] as Map)['code'], -32800);
+      expect(bridge.committed, isFalse);
+    },
+  );
+
   test('canonical retrieval reports unavailable without a snapshot', () async {
     final dispatcher = RelGeoMcpToolDispatcher(_handlers());
     await expectLater(
@@ -672,7 +1038,80 @@ Rect uses width and height.''',
             ),
       ),
     );
+
+    final failedOwner = RelGeoMcpToolDispatcher(
+      _handlers(validateSource: (_) => throw StateError('owner detail')),
+    );
+    await expectLater(
+      failedOwner.call('relgeo_validate_source', <String, Object?>{
+        'source': 'objects: {}',
+      }),
+      throwsA(
+        isA<McpDispatchException>()
+            .having((error) => error.code, 'code', -32006)
+            .having(
+              (error) => error.data?['category'],
+              'category',
+              'owner-failure',
+            ),
+      ),
+    );
   });
+
+  test(
+    'diagnostic catalog resources carry versioned cache identity and TTL',
+    () async {
+      var now = DateTime.utc(2026, 11, 3, 10);
+      final cache = McpResourceCache(clock: () => now);
+      const catalog = McpDiagnosticCatalog(
+        specVersion: '0.5',
+        revision: 'diagnostic-rev-1',
+        digest: 'sha256:diagnostics-1',
+        sourceUrl: 'https://github.com/relgeo/spec/tree/diagnostic-rev-1/id',
+        entries: <McpDiagnosticDefinition>[
+          McpDiagnosticDefinition(
+            code: 'INVALID_OBJECT_TYPE',
+            title: 'Invalid object type',
+            explanation: 'Use a type declared by the RelGeo specification.',
+            severity: DiagnosticSeverity.error,
+          ),
+        ],
+      );
+      final store = RelGeoMcpResourceStore(
+        diagnosticCatalog: catalog,
+        cache: cache,
+      );
+
+      final first = await store.read('relgeo://diagnostics/catalog');
+      final firstJson = jsonDecode(first.text) as Map<String, Object?>;
+      expect(firstJson['revision'], 'diagnostic-rev-1');
+      expect(first.provenance?.digest, 'sha256:diagnostics-1');
+      expect(first.cacheIdentity?.state, 'bundled');
+      expect(first.cacheIdentity?.expiresAt.isAfter(now), isTrue);
+
+      final second = await store.read('relgeo://diagnostics/catalog');
+      expect(second.cacheIdentity?.revision, 'diagnostic-rev-1');
+      expect(
+        cache.read(
+          'relgeo://diagnostics/catalog',
+          revision: 'diagnostic-rev-other',
+        ),
+        isNull,
+      );
+      expect(
+        () => cache.put(
+          first,
+          specVersion: '0.5',
+          revision: 'diagnostic-rev-1',
+          digest: 'sha256:diagnostics-1',
+          ttl: const Duration(days: 2),
+        ),
+        throwsArgumentError,
+      );
+      now = now.add(const Duration(minutes: 16));
+      expect(cache.read('relgeo://diagnostics/catalog'), isNull);
+    },
+  );
 
   test('server session is explicitly enabled and revokes tokens on stop', () {
     final session = McpServerSession(

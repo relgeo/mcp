@@ -137,4 +137,51 @@ void main() {
       isTrue,
     );
   });
+
+  test('edit result states serialize review and cancellation explicitly', () {
+    final proposal = DocumentEditProposal(
+      baseDocumentId: 'doc-1',
+      baseRevision: 7,
+      summary: 'Review this patch',
+      edits: <DocumentEdit>[
+        DocumentEdit(
+          range: SourceRange(start: 0, end: 0),
+          replacement: 'note: reviewed\n',
+        ),
+      ],
+    );
+    const snapshot = ActiveDocumentSnapshot(
+      documentId: 'doc-1',
+      name: 'drawing.relgeo',
+      source: 'scene: old\n',
+      revision: 7,
+      dirty: true,
+    );
+    final review = DocumentEditResult.review(
+      proposal: proposal,
+      snapshot: snapshot,
+    );
+    final cancelled = DocumentEditResult.cancelled(
+      message: 'client disconnected',
+    );
+    const failed = DocumentEditResult.failed(
+      message: 'editor transaction failed before completion',
+    );
+
+    expect(review.status, DocumentEditStatus.review);
+    expect(review.toJson()['proposal'], isNotNull);
+    expect(cancelled.status, DocumentEditStatus.cancelled);
+    expect(cancelled.toJson()['status'], 'cancelled');
+    expect(cancelled.toJson()['snapshot'], isNull);
+    expect(failed.status, DocumentEditStatus.failed);
+    expect(failed.toJson()['newRevision'], isNull);
+
+    final token = McpCancellationToken()..cancel('server stopped');
+    expect(token.isCancelled, isTrue);
+    expect(token.reason, 'server stopped');
+    expect(
+      token.throwIfCancelled,
+      throwsA(isA<McpRequestCancelledException>()),
+    );
+  });
 }

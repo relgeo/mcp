@@ -252,16 +252,59 @@ class DocumentEditProposal {
   }
 }
 
-enum DocumentEditStatus { applied, stale, rejected, failed }
+enum DocumentEditStatus { review, applied, stale, rejected, failed, cancelled }
+
+/// Cooperative cancellation boundary for one in-flight MCP request.
+///
+/// Hosts must check this token before committing a mutation. Cancellation is
+/// deliberately cooperative so the pure-Dart contract remains independent of
+/// sockets, isolates, and Flutter lifecycle objects.
+class McpCancellationToken {
+  bool _cancelled = false;
+  String _reason = 'Request cancelled';
+
+  bool get isCancelled => _cancelled;
+  String get reason => _reason;
+
+  void cancel([String reason = 'Request cancelled']) {
+    _cancelled = true;
+    if (reason.isNotEmpty) _reason = reason;
+  }
+
+  void throwIfCancelled() {
+    if (_cancelled) throw McpRequestCancelledException(_reason);
+  }
+}
+
+class McpRequestCancelledException implements Exception {
+  const McpRequestCancelledException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'McpRequestCancelledException: $message';
+}
 
 class DocumentEditResult {
   const DocumentEditResult({
     required this.status,
+    this.proposal,
     this.newRevision,
     this.message,
     this.snapshot,
     this.diagnostics = const <DocumentDiagnostic>[],
   });
+
+  const DocumentEditResult.review({
+    required DocumentEditProposal proposal,
+    required ActiveDocumentSnapshot snapshot,
+    List<DocumentDiagnostic> diagnostics = const <DocumentDiagnostic>[],
+  }) : this(
+         status: DocumentEditStatus.review,
+         proposal: proposal,
+         snapshot: snapshot,
+         diagnostics: diagnostics,
+       );
 
   const DocumentEditResult.applied({
     required int newRevision,
@@ -301,7 +344,17 @@ class DocumentEditResult {
          diagnostics: diagnostics,
        );
 
+  const DocumentEditResult.cancelled({
+    String? message,
+    List<DocumentDiagnostic> diagnostics = const <DocumentDiagnostic>[],
+  }) : this(
+         status: DocumentEditStatus.cancelled,
+         message: message,
+         diagnostics: diagnostics,
+       );
+
   final DocumentEditStatus status;
+  final DocumentEditProposal? proposal;
   final int? newRevision;
   final String? message;
   final ActiveDocumentSnapshot? snapshot;
@@ -309,6 +362,7 @@ class DocumentEditResult {
 
   Map<String, Object?> toJson() => <String, Object?>{
     'status': status.name,
+    'proposal': proposal?.toJson(),
     'newRevision': newRevision,
     'message': message,
     'snapshot': snapshot?.toJson(),
@@ -323,6 +377,46 @@ abstract interface class RelGeoAgentBridge {
   Future<List<DocumentDiagnostic>> getDiagnostics();
 
   Future<DocumentEditResult> applyDocumentEdit(DocumentEditProposal proposal);
+
+  /// Applies an edit only if [cancellation] is still live at the host's
+  /// commit boundary. Hosts with a synchronous editor transaction should
+  /// override this method and check immediately before the setter/transaction.
+  Future<DocumentEditResult> applyDocumentEditGuarded(
+    DocumentEditProposal proposal,
+    McpCancellationToken cancellation,
+  ) async {
+    cancellation.throwIfCancelled();
+    final result = await applyDocumentEdit(proposal);
+    if (cancellation.isCancelled) {
+      return DocumentEditResult.cancelled(message: cancellation.reason);
+    }
+    return result;
+  }
+
+  /// Reviews a proposal without mutating the active document.
+  Future<DocumentEditResult> reviewDocumentEdit(
+    DocumentEditProposal proposal,
+  ) async {
+    final snapshot = await getActiveDocument();
+    if (snapshot == null) {
+      return const DocumentEditResult.failed(
+        message: 'No active document session is connected',
+      );
+    }
+    final validation = proposal.validateAgainst(snapshot);
+    final stale = validation.any(
+      (error) =>
+          error == 'baseDocumentId does not identify the active document' ||
+          error == 'baseRevision is stale',
+    );
+    if (stale) {
+      return DocumentEditResult.stale(message: validation.join('; '));
+    }
+    if (validation.isNotEmpty) {
+      return DocumentEditResult.rejected(message: validation.join('; '));
+    }
+    return DocumentEditResult.review(proposal: proposal, snapshot: snapshot);
+  }
 }
 
 enum McpPermission { readOnly, readWrite }

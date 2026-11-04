@@ -7,6 +7,8 @@ import 'protocol_conformance.dart';
 Future<void> main(List<String> args) async {
   await _runStdio();
   stdout.writeln('stdio fixture conformance: PASS');
+  await _runRemoteHostGuard();
+  stdout.writeln('remote bind guard: PASS');
   if (args.contains('--stdio-only')) return;
   try {
     await _runHttp();
@@ -58,6 +60,7 @@ Future<void> _runStdio() async {
       sendNotification: sendNotification,
     );
   } finally {
+    await responses.cancel();
     await process.stdin.close();
     await process.exitCode;
   }
@@ -125,14 +128,59 @@ Future<void> _runHttp() async {
     await response.drain<void>();
   }
 
+  Future<int> statusWithProtocol(String? protocolVersion) async {
+    final httpRequest = await client.postUrl(Uri.parse(endpoint));
+    httpRequest.headers
+      ..set('Accept', 'application/json, text/event-stream')
+      ..set('Content-Type', 'application/json');
+    if (protocolVersion != null) {
+      httpRequest.headers.set('MCP-Protocol-Version', protocolVersion);
+    }
+    httpRequest.write(
+      jsonEncode(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 9,
+        'method': 'tools/list',
+      }),
+    );
+    final response = await httpRequest.close();
+    await response.drain<void>();
+    return response.statusCode;
+  }
+
   try {
     await runFixtureConformance(
       sendRequest: sendRequest,
       sendNotification: sendNotification,
     );
+    if (await statusWithProtocol(null) != HttpStatus.badRequest) {
+      throw StateError('HTTP fixture accepted missing protocol metadata');
+    }
+    if (await statusWithProtocol('unsupported') != HttpStatus.badRequest) {
+      throw StateError('HTTP fixture accepted mismatched protocol metadata');
+    }
   } finally {
     client.close(force: true);
     process.kill(ProcessSignal.sigterm);
     await process.exitCode;
+  }
+}
+
+Future<void> _runRemoteHostGuard() async {
+  final process = await Process.start(Platform.resolvedExecutable, <String>[
+    '--suppress-analytics',
+    'run',
+    'tool/mcp_fixture_server.dart',
+    '--transport',
+    'http',
+    '--host',
+    '0.0.0.0',
+    '--port',
+    '0',
+  ], workingDirectory: Directory.current.path);
+  final stderr = await process.stderr.transform(utf8.decoder).join();
+  final exitCode = await process.exitCode;
+  if (exitCode != 64 || !stderr.contains('remote HTTP is disabled')) {
+    throw StateError('remote bind guard failed (code $exitCode): $stderr');
   }
 }

@@ -72,4 +72,38 @@ void main() {
     expect(response?['error'], isA<Map<String, Object?>>());
     expect((response?['error'] as Map<String, Object?>)['code'], -32602);
   });
+
+  test('fixture reports invalid tool arguments without terminating', () {
+    final fixture = McpProtocolFixture();
+    fixture.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'initialize',
+      'params': <String, Object?>{'protocolVersion': mcpFixtureProtocolVersion},
+    });
+    fixture.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'method': 'notifications/initialized',
+    });
+
+    final response = fixture.handle(<String, Object?>{
+      'jsonrpc': '2.0',
+      'id': 2,
+      'method': 'tools/call',
+      'params': <String, Object?>{
+        'name': mcpFixtureToolName,
+        'arguments': <String, Object?>{'message': ''},
+      },
+    });
+
+    expect((response?['error'] as Map<String, Object?>)['code'], -32602);
+    expect(
+      fixture.handle(<String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 3,
+        'method': 'tools/list',
+      }),
+      isNotNull,
+    );
+  });
 }

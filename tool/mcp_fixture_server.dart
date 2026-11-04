@@ -61,6 +61,11 @@ Future<void> _handleHttpRequest(HttpRequest request) async {
     await request.response.close();
     return;
   }
+  if (request.headers.contentType?.mimeType != 'application/json') {
+    request.response.statusCode = HttpStatus.unsupportedMediaType;
+    await request.response.close();
+    return;
+  }
   final accept = request.headers.value('accept') ?? '';
   if (!accept.contains('application/json') ||
       !accept.contains('text/event-stream')) {

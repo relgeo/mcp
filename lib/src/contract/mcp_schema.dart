@@ -2,6 +2,18 @@ import 'session_bridge.dart';
 
 /// The version of the RelGeo language contract used by the MVP tools.
 const relGeoMvpSpecVersion = '0.5';
+const relGeoLanguageServiceProtocolVersion = '0.2';
+const relGeoPositionEncoding = 'utf-16';
+
+/// Shared response/input bounds for read-only executors.
+class McpReadOnlyBounds {
+  const McpReadOnlyBounds._();
+
+  static const int maxSourceCodeUnits = 1024 * 1024;
+  static const int maxDiagnosticCount = 100;
+  static const int maxExampleSourceCodeUnits = 64 * 1024;
+  static const int maxRenderedCodeUnits = 4 * 1024 * 1024;
+}
 
 /// A source range expressed in the line/character coordinate system used by
 /// language-service consumers. It is deliberately separate from [SourceRange],
@@ -53,12 +65,18 @@ class McpProvenance {
     required this.sourceUrl,
     required this.specVersion,
     required this.revision,
+    this.digest,
+    this.fetchedAt,
+    this.expiresAt,
   });
 
   final McpProvenanceSource source;
   final String sourceUrl;
   final String specVersion;
   final String revision;
+  final String? digest;
+  final DateTime? fetchedAt;
+  final DateTime? expiresAt;
 
   bool get isNormative => source == McpProvenanceSource.spec;
 
@@ -68,6 +86,87 @@ class McpProvenance {
     'specVersion': specVersion,
     'revision': revision,
     'normative': isNormative,
+    if (digest != null) 'digest': digest!,
+    if (fetchedAt != null) 'fetchedAt': fetchedAt!.toUtc().toIso8601String(),
+    if (expiresAt != null) 'expiresAt': expiresAt!.toUtc().toIso8601String(),
+  };
+}
+
+/// Identity attached to a cached or fallback resource.
+///
+/// The identity is intentionally content-oriented: a caller can reject a
+/// resource without trusting the cache key or a local path. A fallback is
+/// still explicit and never masquerades as the requested revision.
+class McpResourceCacheIdentity {
+  const McpResourceCacheIdentity({
+    required this.specVersion,
+    required this.revision,
+    required this.digest,
+    required this.state,
+    required this.fetchedAt,
+    required this.expiresAt,
+  }) : assert(specVersion != ''),
+       assert(revision != ''),
+       assert(digest != ''),
+       assert(state != '');
+
+  final String specVersion;
+  final String revision;
+  final String digest;
+  final String state;
+  final DateTime fetchedAt;
+  final DateTime expiresAt;
+
+  bool isFreshAt(DateTime now) => now.isBefore(expiresAt);
+
+  Map<String, Object> toJson() => <String, Object>{
+    'specVersion': specVersion,
+    'revision': revision,
+    'digest': digest,
+    'state': state,
+    'fetchedAt': fetchedAt.toUtc().toIso8601String(),
+    'expiresAt': expiresAt.toUtc().toIso8601String(),
+  };
+}
+
+/// Stable document/request identity shared by editor-facing MCP results.
+///
+/// The identity is optional on legacy tool calls, but when supplied it must
+/// be echoed by the adapter so hosts can discard a response that belongs to a
+/// different document version or request.
+class McpLanguageServiceIdentity {
+  const McpLanguageServiceIdentity({
+    required this.documentId,
+    required this.version,
+    required this.requestId,
+    required this.specVersion,
+    this.sourceRevision,
+    this.protocolVersion = relGeoLanguageServiceProtocolVersion,
+    this.positionEncoding = relGeoPositionEncoding,
+  }) : assert(documentId != ''),
+       assert(version >= 0),
+       assert(requestId != ''),
+       assert(specVersion != ''),
+       assert(sourceRevision == null || sourceRevision != ''),
+       assert(protocolVersion != ''),
+       assert(positionEncoding != '');
+
+  final String documentId;
+  final int version;
+  final String requestId;
+  final String specVersion;
+  final String? sourceRevision;
+  final String protocolVersion;
+  final String positionEncoding;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'protocolVersion': protocolVersion,
+    'documentId': documentId,
+    'version': version,
+    'requestId': requestId,
+    'specVersion': specVersion,
+    'positionEncoding': positionEncoding,
+    if (sourceRevision != null) 'sourceRevision': sourceRevision!,
   };
 }
 
@@ -481,18 +580,21 @@ class CompleteSourceInput {
     required this.position,
     this.specVersion = relGeoMvpSpecVersion,
     this.maxResults = 32,
+    this.identity,
   }) : assert(maxResults > 0 && maxResults <= 64);
 
   final String source;
   final TextPosition position;
   final String specVersion;
   final int maxResults;
+  final McpLanguageServiceIdentity? identity;
 
   Map<String, Object> toJson() => <String, Object>{
     'source': source,
     'position': position.toJson(),
     'specVersion': specVersion,
     'maxResults': maxResults,
+    if (identity != null) 'identity': identity!.toJson(),
   };
 }
 
@@ -502,31 +604,40 @@ class ValidateSourceInput {
     this.sourceKind = SourceArtifactKind.input,
     this.specVersion = relGeoMvpSpecVersion,
     this.includeInfo = false,
+    this.identity,
   });
 
   final String source;
   final SourceArtifactKind sourceKind;
   final String specVersion;
   final bool includeInfo;
+  final McpLanguageServiceIdentity? identity;
 
   Map<String, Object> toJson() => <String, Object>{
     'source': source,
     'sourceKind': sourceKind.name,
     'specVersion': specVersion,
     'includeInfo': includeInfo,
+    if (identity != null) 'identity': identity!.toJson(),
   };
 }
 
 class ExplainDiagnosticInput {
-  const ExplainDiagnosticInput({required this.code, this.message})
-    : assert(code != '');
+  const ExplainDiagnosticInput({
+    required this.code,
+    this.message,
+    this.specVersion = relGeoMvpSpecVersion,
+  }) : assert(code != ''),
+       assert(specVersion != '');
 
   final String code;
   final String? message;
+  final String specVersion;
 
   Map<String, Object?> toJson() => <String, Object?>{
     'code': code,
     'message': message,
+    'specVersion': specVersion,
   };
 }
 
@@ -560,6 +671,9 @@ class RelGeoDiagnostic {
     required this.severity,
     required this.origin,
     this.range,
+    this.phase,
+    this.path,
+    this.mode,
     this.provenance,
   });
 
@@ -568,6 +682,9 @@ class RelGeoDiagnostic {
   final DiagnosticSeverity severity;
   final TextRange? range;
   final McpProvenanceSource origin;
+  final String? phase;
+  final String? path;
+  final String? mode;
   final McpProvenance? provenance;
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -576,7 +693,62 @@ class RelGeoDiagnostic {
     'severity': severity.name,
     'range': range?.toJson(),
     'origin': origin.name,
+    if (phase != null) 'phase': phase!,
+    if (path != null) 'path': path!,
+    if (mode != null) 'mode': mode!,
     'provenance': provenance?.toJson(),
+  };
+}
+
+class McpDiagnosticDefinition {
+  const McpDiagnosticDefinition({
+    required this.code,
+    required this.title,
+    required this.explanation,
+    required this.severity,
+  }) : assert(code != ''),
+       assert(title != ''),
+       assert(explanation != '');
+
+  final String code;
+  final String title;
+  final String explanation;
+  final DiagnosticSeverity severity;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'code': code,
+    'title': title,
+    'explanation': explanation,
+    'severity': severity.name,
+  };
+}
+
+/// Versioned diagnostic catalog supplied by the owner of the diagnostic
+/// vocabulary. The MCP adapter only serializes and bounds it.
+class McpDiagnosticCatalog {
+  const McpDiagnosticCatalog({
+    required this.specVersion,
+    required this.revision,
+    required this.digest,
+    required this.sourceUrl,
+    required this.entries,
+  }) : assert(specVersion != ''),
+       assert(revision != ''),
+       assert(digest != ''),
+       assert(sourceUrl != '');
+
+  final String specVersion;
+  final String revision;
+  final String digest;
+  final String sourceUrl;
+  final List<McpDiagnosticDefinition> entries;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'specVersion': specVersion,
+    'revision': revision,
+    'digest': digest,
+    'sourceUrl': sourceUrl,
+    'diagnostics': entries.map((entry) => entry.toJson()).toList(),
   };
 }
 
@@ -687,12 +859,20 @@ class CompletionProposal {
 }
 
 class CompletionResult {
-  const CompletionResult({required this.items});
+  const CompletionResult({required this.items, this.identity});
 
   final List<CompletionProposal> items;
+  final McpLanguageServiceIdentity? identity;
+
+  CompletionResult withIdentity(McpLanguageServiceIdentity value) =>
+      identity == null ? CompletionResult(items: items, identity: value) : this;
+
+  CompletionResult withIdentityIfMissing(McpLanguageServiceIdentity? value) =>
+      value == null ? this : withIdentity(value);
 
   Map<String, Object> toJson() => <String, Object>{
     'items': items.map((item) => item.toJson()).toList(),
+    if (identity != null) 'identity': identity!.toJson(),
   };
 }
 
@@ -704,6 +884,9 @@ class ValidationResult {
     required this.specVersion,
     required this.diagnostics,
     required this.provenance,
+    this.identity,
+    this.readiness,
+    this.recoveryState,
   });
 
   final String source;
@@ -712,6 +895,27 @@ class ValidationResult {
   final String specVersion;
   final List<RelGeoDiagnostic> diagnostics;
   final McpProvenance provenance;
+  final McpLanguageServiceIdentity? identity;
+  final String? readiness;
+  final String? recoveryState;
+
+  ValidationResult withIdentity(McpLanguageServiceIdentity value) =>
+      identity == null
+      ? ValidationResult(
+          source: source,
+          sourceKind: sourceKind,
+          valid: valid,
+          specVersion: specVersion,
+          diagnostics: diagnostics,
+          provenance: provenance,
+          identity: value,
+          readiness: readiness,
+          recoveryState: recoveryState,
+        )
+      : this;
+
+  ValidationResult withIdentityIfMissing(McpLanguageServiceIdentity? value) =>
+      value == null ? this : withIdentity(value);
 
   Map<String, Object> toJson() => <String, Object>{
     'source': source,
@@ -720,6 +924,9 @@ class ValidationResult {
     'specVersion': specVersion,
     'diagnostics': diagnostics.map((item) => item.toJson()).toList(),
     'provenance': provenance.toJson(),
+    if (identity != null) 'identity': identity!.toJson(),
+    if (readiness != null) 'readiness': readiness!,
+    if (recoveryState != null) 'recoveryState': recoveryState!,
   };
 }
 
@@ -1068,7 +1275,10 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
       'additionalProperties': false,
       'required': <String>['source', 'position'],
       'properties': <String, Object?>{
-        'source': <String, Object?>{'type': 'string'},
+        'source': <String, Object?>{
+          'type': 'string',
+          'maxLength': McpReadOnlyBounds.maxSourceCodeUnits,
+        },
         'position': <String, Object?>{
           'type': 'object',
           'additionalProperties': false,
@@ -1089,6 +1299,29 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
           'maximum': 64,
           'default': 32,
         },
+        'identity': <String, Object?>{
+          'type': 'object',
+          'additionalProperties': false,
+          'required': <String>['documentId', 'version', 'requestId'],
+          'properties': <String, Object?>{
+            'documentId': <String, Object?>{'type': 'string', 'minLength': 1},
+            'version': <String, Object?>{'type': 'integer', 'minimum': 0},
+            'requestId': <String, Object?>{'type': 'string', 'minLength': 1},
+            'specVersion': <String, Object?>{'type': 'string', 'minLength': 1},
+            'sourceRevision': <String, Object?>{
+              'type': 'string',
+              'minLength': 1,
+            },
+            'protocolVersion': <String, Object?>{
+              'type': 'string',
+              'minLength': 1,
+            },
+            'positionEncoding': <String, Object?>{
+              'type': 'string',
+              'enum': <String>['utf-16'],
+            },
+          },
+        },
       },
     },
   ),
@@ -1103,7 +1336,10 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
       'additionalProperties': false,
       'required': <String>['source'],
       'properties': <String, Object?>{
-        'source': <String, Object?>{'type': 'string'},
+        'source': <String, Object?>{
+          'type': 'string',
+          'maxLength': McpReadOnlyBounds.maxSourceCodeUnits,
+        },
         'sourceKind': <String, Object?>{
           'type': 'string',
           'enum': <String>['input', 'proposal', 'activeDocument'],
@@ -1111,6 +1347,29 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
         },
         'specVersion': <String, Object?>{'type': 'string', 'default': '0.5'},
         'includeInfo': <String, Object?>{'type': 'boolean', 'default': false},
+        'identity': <String, Object?>{
+          'type': 'object',
+          'additionalProperties': false,
+          'required': <String>['documentId', 'version', 'requestId'],
+          'properties': <String, Object?>{
+            'documentId': <String, Object?>{'type': 'string', 'minLength': 1},
+            'version': <String, Object?>{'type': 'integer', 'minimum': 0},
+            'requestId': <String, Object?>{'type': 'string', 'minLength': 1},
+            'specVersion': <String, Object?>{'type': 'string', 'minLength': 1},
+            'sourceRevision': <String, Object?>{
+              'type': 'string',
+              'minLength': 1,
+            },
+            'protocolVersion': <String, Object?>{
+              'type': 'string',
+              'minLength': 1,
+            },
+            'positionEncoding': <String, Object?>{
+              'type': 'string',
+              'enum': <String>['utf-16'],
+            },
+          },
+        },
       },
     },
   ),
@@ -1127,6 +1386,11 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
       'properties': <String, Object?>{
         'code': <String, Object?>{'type': 'string', 'minLength': 1},
         'message': <String, Object?>{'type': 'string'},
+        'specVersion': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'default': relGeoMvpSpecVersion,
+        },
       },
     },
   ),
@@ -1142,7 +1406,10 @@ const relGeoMvpToolContracts = <RelGeoToolContract>[
       'additionalProperties': false,
       'required': <String>['source'],
       'properties': <String, Object?>{
-        'source': <String, Object?>{'type': 'string'},
+        'source': <String, Object?>{
+          'type': 'string',
+          'maxLength': McpReadOnlyBounds.maxSourceCodeUnits,
+        },
         'format': <String, Object?>{
           'type': 'string',
           'enum': <String>['svg'],
@@ -1170,8 +1437,6 @@ const relGeoMvpResourceUris = <String>[
 ];
 
 /// Resource templates reserved for the full-spec adapter boundary.
-const relGeoSpecRetrievalResourceUris = <String>[
-  'relgeo://spec/index',
-];
+const relGeoSpecRetrievalResourceUris = <String>['relgeo://spec/index'];
 
 const relGeoSpecSectionResourceTemplate = 'relgeo://spec/sections/{sectionId}';

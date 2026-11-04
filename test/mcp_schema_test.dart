@@ -39,6 +39,9 @@ void main() {
         message: 'Invalid object type',
         severity: DiagnosticSeverity.error,
         origin: McpProvenanceSource.languageService,
+        phase: 'validate',
+        path: 'objects.bad.type',
+        mode: 'validate',
         range: TextRange(
           start: TextPosition(line: 1, character: 4),
           end: TextPosition(line: 1, character: 8),
@@ -62,8 +65,50 @@ void main() {
         ((json['diagnostics'] as List<Object?>).single as Map)['origin'],
         'languageService',
       );
+      expect(
+        ((json['diagnostics'] as List<Object?>).single as Map)['phase'],
+        'validate',
+      );
+      expect(
+        ((json['diagnostics'] as List<Object?>).single as Map)['path'],
+        'objects.bad.type',
+      );
     },
   );
+
+  test('editor identity is stable and serializable across result families', () {
+    const identity = McpLanguageServiceIdentity(
+      documentId: 'doc-1',
+      version: 7,
+      requestId: 'req-7',
+      specVersion: '0.5',
+      sourceRevision: 'sha256:source',
+    );
+    expect(identity.toJson(), <String, Object>{
+      'protocolVersion': '0.2',
+      'documentId': 'doc-1',
+      'version': 7,
+      'requestId': 'req-7',
+      'specVersion': '0.5',
+      'positionEncoding': 'utf-16',
+      'sourceRevision': 'sha256:source',
+    });
+
+    const result = ValidationResult(
+      source: 'objects: {}',
+      sourceKind: SourceArtifactKind.activeDocument,
+      valid: true,
+      specVersion: '0.5',
+      diagnostics: <RelGeoDiagnostic>[],
+      provenance: specProvenance,
+      identity: identity,
+      readiness: 'semantically-valid',
+      recoveryState: 'recovered',
+    );
+    expect(result.toJson()['identity'], identity.toJson());
+    expect(result.toJson()['readiness'], 'semantically-valid');
+    expect(result.toJson()['recoveryState'], 'recovered');
+  });
 
   test('resource URI parser accepts only canonical resources', () {
     final rule = RelGeoResourceUri.parse(
@@ -129,6 +174,12 @@ void main() {
     );
     expect(
       ((schemas['relgeo_render_source']!['properties']
+              as Map<String, Object?>)['specVersion']
+          as Map<String, Object?>)['default'],
+      '0.5',
+    );
+    expect(
+      ((schemas['relgeo_explain_diagnostic']!['properties']
               as Map<String, Object?>)['specVersion']
           as Map<String, Object?>)['default'],
       '0.5',

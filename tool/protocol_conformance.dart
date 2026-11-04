@@ -65,9 +65,23 @@ Future<void> runFixtureConformance({
     'tools/call structured content',
   );
 
+  final invalidToolCall = await sendRequest(<String, Object?>{
+    'jsonrpc': '2.0',
+    'id': 6,
+    'method': 'tools/call',
+    'params': <String, Object?>{
+      'name': mcpFixtureToolName,
+      'arguments': <String, Object?>{'message': ''},
+    },
+  });
+  _expect(
+    _map(invalidToolCall['error'])?['code'] == -32602,
+    'invalid tool arguments return a protocol error',
+  );
+
   final resources = await sendRequest(<String, Object?>{
     'jsonrpc': '2.0',
-    'id': 4,
+    'id': 7,
     'method': 'resources/list',
     'params': <String, Object?>{},
   });
@@ -79,7 +93,7 @@ Future<void> runFixtureConformance({
 
   final resource = await sendRequest(<String, Object?>{
     'jsonrpc': '2.0',
-    'id': 5,
+    'id': 8,
     'method': 'resources/read',
     'params': <String, Object?>{'uri': mcpFixtureResourceUri},
   });

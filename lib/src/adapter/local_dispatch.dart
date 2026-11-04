@@ -23,6 +23,40 @@ class McpDispatchException implements Exception {
   String toString() => 'McpDispatchException($code): $message';
 }
 
+/// Tracks in-flight JSON-RPC requests without coupling the router to a
+/// transport. A cancellation notification may arrive while an owner callback
+/// is awaiting; the token then remains cancelled until the request observes it.
+class McpRequestCancellationRegistry {
+  final Map<Object, McpCancellationToken> _active =
+      <Object, McpCancellationToken>{};
+
+  McpCancellationToken? begin(Object? requestId) {
+    if (requestId is! String && requestId is! num) return null;
+    final key = requestId as Object;
+    final token = McpCancellationToken();
+    _active[key] = token;
+    return token;
+  }
+
+  void cancel(Object? requestId, [String reason = 'Request cancelled']) {
+    if (requestId is! String && requestId is! num) return;
+    final key = requestId as Object;
+    _active[key]?.cancel(reason);
+  }
+
+  void cancelAll([String reason = 'MCP server stopped']) {
+    for (final token in _active.values) {
+      token.cancel(reason);
+    }
+  }
+
+  void finish(Object? requestId) {
+    if (requestId is! String && requestId is! num) return;
+    final key = requestId as Object;
+    _active.remove(key);
+  }
+}
+
 typedef FindSyntaxHandler =
     FutureOr<FindSyntaxResult> Function(FindSyntaxInput input);
 typedef GetSyntaxRuleHandler =
@@ -73,19 +107,121 @@ class McpResourceContent {
     required this.mimeType,
     required this.text,
     this.provenance,
+    this.cacheIdentity,
   });
 
   final String uri;
   final String mimeType;
   final String text;
   final McpProvenance? provenance;
+  final McpResourceCacheIdentity? cacheIdentity;
+
+  McpResourceContent withCacheIdentity(McpResourceCacheIdentity identity) =>
+      McpResourceContent(
+        uri: uri,
+        mimeType: mimeType,
+        text: text,
+        provenance: provenance,
+        cacheIdentity: identity,
+      );
 
   Map<String, Object?> toJson() => <String, Object?>{
     'uri': uri,
     'mimeType': mimeType,
     'text': text,
     if (provenance != null) 'provenance': provenance!.toJson(),
+    if (cacheIdentity != null) 'cache': cacheIdentity!.toJson(),
   };
+}
+
+/// Small, identity-aware cache for explanatory/diagnostic resources.
+///
+/// The cache never decides semantic meaning. It only returns a content item
+/// when the requested version/revision/digest matches and the bounded TTL has
+/// not elapsed. A caller can explicitly store a `fallback` state so offline
+/// fallback is visible to the client.
+class McpResourceCache {
+  McpResourceCache({
+    DateTime Function()? clock,
+    this.defaultTtl = const Duration(minutes: 15),
+    this.maxTtl = const Duration(hours: 24),
+  }) : _clock = clock ?? DateTime.now {
+    if (defaultTtl <= Duration.zero || defaultTtl > maxTtl) {
+      throw ArgumentError.value(defaultTtl, 'defaultTtl');
+    }
+    if (maxTtl <= Duration.zero) {
+      throw ArgumentError.value(maxTtl, 'maxTtl');
+    }
+  }
+
+  final DateTime Function() _clock;
+  final Duration defaultTtl;
+  final Duration maxTtl;
+  final Map<String, McpResourceContent> _entries =
+      <String, McpResourceContent>{};
+
+  McpResourceContent? read(
+    String uri, {
+    String? specVersion,
+    String? revision,
+    String? digest,
+  }) {
+    final content = _entries[uri];
+    final identity = content?.cacheIdentity;
+    if (content == null || identity == null) return null;
+    if (!identity.isFreshAt(_clock())) {
+      _entries.remove(uri);
+      return null;
+    }
+    if ((specVersion != null && identity.specVersion != specVersion) ||
+        (revision != null && identity.revision != revision) ||
+        (digest != null && identity.digest != digest)) {
+      return null;
+    }
+    return content;
+  }
+
+  McpResourceContent put(
+    McpResourceContent content, {
+    required String specVersion,
+    required String revision,
+    required String digest,
+    Duration? ttl,
+    String state = 'cache',
+  }) {
+    final effectiveTtl = ttl ?? defaultTtl;
+    if (effectiveTtl <= Duration.zero || effectiveTtl > maxTtl) {
+      throw ArgumentError.value(effectiveTtl, 'ttl');
+    }
+    if (state.isEmpty) throw ArgumentError.value(state, 'state');
+    final fetchedAt = _clock().toUtc();
+    final identity = McpResourceCacheIdentity(
+      specVersion: specVersion,
+      revision: revision,
+      digest: digest,
+      state: state,
+      fetchedAt: fetchedAt,
+      expiresAt: fetchedAt.add(effectiveTtl),
+    );
+    final cached = content.withCacheIdentity(identity);
+    _entries[content.uri] = cached;
+    return cached;
+  }
+
+  McpResourceContent putFallback(
+    McpResourceContent content, {
+    required String specVersion,
+    required String revision,
+    required String digest,
+    Duration? ttl,
+  }) => put(
+    content,
+    specVersion: specVersion,
+    revision: revision,
+    digest: digest,
+    ttl: ttl,
+    state: 'fallback',
+  );
 }
 
 /// Read-only resource resolver with explicit active-document handling.
@@ -95,6 +231,8 @@ class RelGeoMcpResourceStore {
         const <String, McpResourceContent>{},
     this.activeBridge,
     this.specIndex,
+    this.diagnosticCatalog,
+    this.cache,
   }) : _staticResources = Map<String, McpResourceContent>.unmodifiable(
          staticResources,
        );
@@ -102,6 +240,8 @@ class RelGeoMcpResourceStore {
   final Map<String, McpResourceContent> _staticResources;
   final RelGeoAgentBridge? activeBridge;
   final SpecSectionIndex? specIndex;
+  final McpDiagnosticCatalog? diagnosticCatalog;
+  final McpResourceCache? cache;
 
   List<Map<String, Object?>> listResources({bool includeUnavailable = true}) {
     final uris = <String>{
@@ -218,6 +358,37 @@ class RelGeoMcpResourceStore {
                   )
                 : null,
           );
+        }
+        if (uri.kind == RelGeoResourceKind.diagnosticsCatalog &&
+            diagnosticCatalog != null) {
+          final catalog = diagnosticCatalog!;
+          final cached = cache?.read(
+            uri.value,
+            specVersion: catalog.specVersion,
+            revision: catalog.revision,
+            digest: catalog.digest,
+          );
+          if (cached != null) return cached;
+          final content = McpResourceContent(
+            uri: uri.value,
+            mimeType: 'application/json',
+            text: jsonEncode(catalog.toJson()),
+            provenance: McpProvenance(
+              source: McpProvenanceSource.spec,
+              sourceUrl: catalog.sourceUrl,
+              specVersion: catalog.specVersion,
+              revision: catalog.revision,
+              digest: catalog.digest,
+            ),
+          );
+          return cache?.put(
+                content,
+                specVersion: catalog.specVersion,
+                revision: catalog.revision,
+                digest: catalog.digest,
+                state: 'bundled',
+              ) ??
+              content;
         }
         final content = _staticResources[uri.value];
         if (content == null) {
@@ -376,33 +547,60 @@ class RelGeoMcpToolDispatcher {
             throw _versionMismatch(error);
           }
         }
-        return (await _requireHandlers(
+        return (await _invokeOwner(
           name,
-        ).findSyntax(_findSyntax(rawArguments))).toJson();
+          () => _requireHandlers(name).findSyntax(_findSyntax(rawArguments)),
+        )).toJson();
       case 'relgeo_get_syntax_rule':
-        return (await _requireHandlers(
+        return (await _invokeOwner(
           name,
-        ).getSyntaxRule(_getSyntaxRule(rawArguments))).toJson();
+          () => _requireHandlers(
+            name,
+          ).getSyntaxRule(_getSyntaxRule(rawArguments)),
+        )).toJson();
       case 'relgeo_get_examples':
-        return (await _requireHandlers(
+        final examplesInput = _getExamples(rawArguments);
+        final examplesResult = await _invokeOwner(
           name,
-        ).getExamples(_getExamples(rawArguments))).toJson();
+          () => _requireHandlers(name).getExamples(examplesInput),
+        );
+        _guardExamples(examplesInput, examplesResult);
+        return examplesResult.toJson();
       case 'relgeo_complete_source':
-        return (await _requireHandlers(
+        final completeInput = _completeSource(rawArguments);
+        final completeResult = await _invokeOwner(
           name,
-        ).completeSource(_completeSource(rawArguments))).toJson();
+          () => _requireHandlers(name).completeSource(completeInput),
+        );
+        return completeResult
+            .withIdentityIfMissing(completeInput.identity)
+            .toJson();
       case 'relgeo_validate_source':
-        return (await _requireHandlers(
+        final validateInput = _validateSource(rawArguments);
+        final validateResult = await _invokeOwner(
           name,
-        ).validateSource(_validateSource(rawArguments))).toJson();
+          () => _requireHandlers(name).validateSource(validateInput),
+        );
+        _guardValidation(validateInput, validateResult);
+        return validateResult
+            .withIdentityIfMissing(validateInput.identity)
+            .toJson();
       case 'relgeo_explain_diagnostic':
-        return (await _requireHandlers(
+        final explanationInput = _explainDiagnostic(rawArguments);
+        final explanationResult = await _invokeOwner(
           name,
-        ).explainDiagnostic(_explainDiagnostic(rawArguments))).toJson();
+          () => _requireHandlers(name).explainDiagnostic(explanationInput),
+        );
+        _guardExplanation(explanationInput, explanationResult);
+        return explanationResult.toJson();
       case 'relgeo_render_source':
-        return (await _requireHandlers(
+        final renderInput = _renderSource(rawArguments);
+        final renderResult = await _invokeOwner(
           name,
-        ).renderSource(_renderSource(rawArguments))).toJson();
+          () => _requireHandlers(name).renderSource(renderInput),
+        );
+        _guardRender(renderInput, renderResult);
+        return renderResult.toJson();
       default:
         throw McpDispatchException(
           -32601,
@@ -411,6 +609,131 @@ class RelGeoMcpToolDispatcher {
         );
     }
   }
+
+  static void _guardExamples(GetExamplesInput input, ExamplesResult result) {
+    if (result.examples.length > input.maxResults) {
+      throw _ownerBoundsError(
+        'getExamples returned more than maxResults',
+        maximum: input.maxResults,
+      );
+    }
+    for (final example in result.examples) {
+      if (example.source.length > McpReadOnlyBounds.maxExampleSourceCodeUnits) {
+        throw _ownerBoundsError(
+          'getExamples returned an example source that is too large',
+          maximum: McpReadOnlyBounds.maxExampleSourceCodeUnits,
+        );
+      }
+      _guardProvenance(example.provenance, input.specVersion);
+    }
+  }
+
+  static void _guardValidation(
+    ValidateSourceInput input,
+    ValidationResult result,
+  ) {
+    if (result.source != input.source ||
+        result.sourceKind != input.sourceKind) {
+      throw _ownerContractError(
+        'validateSource must preserve source and sourceKind',
+      );
+    }
+    if (result.specVersion != input.specVersion) {
+      throw _ownerContractError(
+        'validateSource returned a different specVersion',
+      );
+    }
+    if (result.diagnostics.length > McpReadOnlyBounds.maxDiagnosticCount) {
+      throw _ownerBoundsError(
+        'validateSource returned too many diagnostics',
+        maximum: McpReadOnlyBounds.maxDiagnosticCount,
+      );
+    }
+    _guardProvenance(result.provenance, input.specVersion);
+    for (final diagnostic in result.diagnostics) {
+      if (diagnostic.message.length > McpReadOnlyBounds.maxSourceCodeUnits) {
+        throw _ownerBoundsError(
+          'validateSource returned an oversized diagnostic message',
+          maximum: McpReadOnlyBounds.maxSourceCodeUnits,
+        );
+      }
+      final provenance = diagnostic.provenance;
+      if (provenance != null) _guardProvenance(provenance, input.specVersion);
+    }
+  }
+
+  static void _guardExplanation(
+    ExplainDiagnosticInput input,
+    DiagnosticExplanationResult result,
+  ) {
+    final provenance = result.documentation.provenance;
+    if (provenance.specVersion != input.specVersion) {
+      throw _ownerContractError(
+        'explainDiagnostic returned a different specVersion',
+      );
+    }
+    if (result.documentation.content.length >
+        McpReadOnlyBounds.maxExampleSourceCodeUnits) {
+      throw _ownerBoundsError(
+        'explainDiagnostic returned oversized documentation',
+        maximum: McpReadOnlyBounds.maxExampleSourceCodeUnits,
+      );
+    }
+  }
+
+  static void _guardRender(RenderSourceInput input, RenderResult result) {
+    if (result.format != input.format) {
+      throw _ownerContractError('renderSource returned a different format');
+    }
+    if (result.content.length > McpReadOnlyBounds.maxRenderedCodeUnits) {
+      throw _ownerBoundsError(
+        'renderSource returned oversized SVG content',
+        maximum: McpReadOnlyBounds.maxRenderedCodeUnits,
+      );
+    }
+    _guardProvenance(result.provenance, input.specVersion);
+  }
+
+  static void _guardProvenance(McpProvenance value, String specVersion) {
+    if (value.specVersion != specVersion || value.revision.isEmpty) {
+      throw _ownerContractError(
+        'owner result provenance does not match the requested spec revision',
+      );
+    }
+  }
+
+  static McpDispatchException _ownerContractError(String message) =>
+      McpDispatchException(
+        -32005,
+        message,
+        data: <String, Object?>{'category': 'owner-contract'},
+      );
+
+  static Future<T> _invokeOwner<T>(
+    String tool,
+    FutureOr<T> Function() callback,
+  ) async {
+    try {
+      return await callback();
+    } on McpDispatchException {
+      rethrow;
+    } catch (_) {
+      throw McpDispatchException(
+        -32006,
+        'Owner implementation failed for $tool',
+        data: <String, Object?>{'category': 'owner-failure', 'tool': tool},
+      );
+    }
+  }
+
+  static McpDispatchException _ownerBoundsError(
+    String message, {
+    required int maximum,
+  }) => McpDispatchException(
+    -32005,
+    message,
+    data: <String, Object?>{'category': 'owner-bounds', 'maximum': maximum},
+  );
 
   static McpDispatchException _specIndexUnavailable(String tool) =>
       McpDispatchException(
@@ -539,17 +862,26 @@ class RelGeoMcpToolDispatcher {
       'position',
       'specVersion',
       'maxResults',
+      'identity',
     });
     final position = _object(args, 'position');
     _rejectUnknown(position, const <String>{'line', 'character'});
     return CompleteSourceInput(
-      source: _requiredString(args, 'source'),
+      source: _requiredBoundedString(
+        args,
+        'source',
+        McpReadOnlyBounds.maxSourceCodeUnits,
+      ),
       position: TextPosition(
         line: _requiredInt(position, 'line', 0),
         character: _requiredInt(position, 'character', 0),
       ),
       specVersion: _optionalVersion(args),
       maxResults: _optionalInt(args, 'maxResults', 32, 1, 64),
+      identity: _languageServiceIdentity(
+        args,
+        specVersion: _optionalVersion(args),
+      ),
     );
   }
 
@@ -560,6 +892,7 @@ class RelGeoMcpToolDispatcher {
       'sourceKind',
       'specVersion',
       'includeInfo',
+      'identity',
     });
     final kind = _optionalString(args, 'sourceKind') ?? 'input';
     final sourceKind = SourceArtifactKind.values.where(
@@ -577,19 +910,28 @@ class RelGeoMcpToolDispatcher {
       throw const McpDispatchException(-32602, 'includeInfo must be a boolean');
     }
     return ValidateSourceInput(
-      source: _requiredString(args, 'source'),
+      source: _requiredBoundedString(
+        args,
+        'source',
+        McpReadOnlyBounds.maxSourceCodeUnits,
+      ),
       sourceKind: sourceKind.first,
       specVersion: _optionalVersion(args),
       includeInfo: includeInfo as bool? ?? false,
+      identity: _languageServiceIdentity(
+        args,
+        specVersion: _optionalVersion(args),
+      ),
     );
   }
 
   static ExplainDiagnosticInput _explainDiagnostic(Object? raw) {
     final args = _arguments(raw, 'relgeo_explain_diagnostic');
-    _rejectUnknown(args, const <String>{'code', 'message'});
+    _rejectUnknown(args, const <String>{'code', 'message', 'specVersion'});
     return ExplainDiagnosticInput(
       code: _requiredString(args, 'code'),
       message: _optionalString(args, 'message'),
+      specVersion: _optionalVersion(args),
     );
   }
 
@@ -610,7 +952,11 @@ class RelGeoMcpToolDispatcher {
       );
     }
     return RenderSourceInput(
-      source: _requiredString(args, 'source'),
+      source: _requiredBoundedString(
+        args,
+        'source',
+        McpReadOnlyBounds.maxSourceCodeUnits,
+      ),
       format: RenderFormat.svg,
       sheetId: _optionalString(args, 'sheetId'),
       specVersion: _optionalVersion(args),
@@ -667,6 +1013,22 @@ class RelGeoMcpToolDispatcher {
     return value;
   }
 
+  static String _requiredBoundedString(
+    Map<String, Object?> args,
+    String key,
+    int maximum,
+  ) {
+    final value = _requiredString(args, key);
+    if (value.length > maximum) {
+      throw McpDispatchException(
+        -32602,
+        '$key exceeds the $maximum code-unit limit',
+        data: <String, Object?>{'maximumCodeUnits': maximum},
+      );
+    }
+    return value;
+  }
+
   static String? _optionalString(Map<String, Object?> args, String key) {
     final value = args[key];
     if (value == null) return null;
@@ -681,6 +1043,36 @@ class RelGeoMcpToolDispatcher {
 
   static String _optionalVersion(Map<String, Object?> args) =>
       _optionalString(args, 'specVersion') ?? relGeoMvpSpecVersion;
+
+  static McpLanguageServiceIdentity? _languageServiceIdentity(
+    Map<String, Object?> args, {
+    required String specVersion,
+  }) {
+    if (args['identity'] == null) return null;
+    final identity = _object(args, 'identity');
+    _rejectUnknown(identity, const <String>{
+      'documentId',
+      'version',
+      'requestId',
+      'specVersion',
+      'sourceRevision',
+      'protocolVersion',
+      'positionEncoding',
+    });
+    return McpLanguageServiceIdentity(
+      documentId: _requiredString(identity, 'documentId'),
+      version: _requiredInt(identity, 'version', 0),
+      requestId: _requiredString(identity, 'requestId'),
+      specVersion: _optionalString(identity, 'specVersion') ?? specVersion,
+      sourceRevision: _optionalString(identity, 'sourceRevision'),
+      protocolVersion:
+          _optionalString(identity, 'protocolVersion') ??
+          relGeoLanguageServiceProtocolVersion,
+      positionEncoding:
+          _optionalString(identity, 'positionEncoding') ??
+          relGeoPositionEncoding,
+    );
+  }
 
   static int _optionalInt(
     Map<String, Object?> args,
@@ -737,9 +1129,23 @@ class RelGeoMcpJsonRpcRouter {
   final RelGeoMcpResourceStore resources;
   bool _initialized = false;
   String? _negotiatedProtocolVersion;
+  final McpRequestCancellationRegistry _cancellations =
+      McpRequestCancellationRegistry();
 
   bool get initialized => _initialized;
   String? get negotiatedProtocolVersion => _negotiatedProtocolVersion;
+
+  /// Cancels work that cannot safely outlive the server/session boundary.
+  void cancelPendingRequests([String reason = 'MCP server stopped']) {
+    _cancellations.cancelAll(reason);
+  }
+
+  void cancelRequest(
+    Object? requestId, [
+    String reason = 'MCP client disconnected',
+  ]) {
+    _cancellations.cancel(requestId, reason);
+  }
 
   Future<Map<String, Object?>?> handle(Map<String, Object?> message) async {
     final hasId = message.containsKey('id');
@@ -755,7 +1161,19 @@ class RelGeoMcpJsonRpcRouter {
 
     if (method == 'notifications/initialized' ||
         method == 'notifications/cancelled') {
-      if (method == 'notifications/initialized') _initialized = true;
+      if (method == 'notifications/initialized') {
+        _initialized = true;
+      } else {
+        final params = message['params'];
+        if (params is Map) {
+          _cancellations.cancel(
+            params['requestId'],
+            params['reason'] is String
+                ? params['reason'] as String
+                : 'Request cancelled',
+          );
+        }
+      }
       return null;
     }
 
@@ -827,6 +1245,7 @@ class RelGeoMcpJsonRpcRouter {
       );
     }
 
+    final cancellation = _cancellations.begin(id);
     try {
       switch (method) {
         case 'tools/list':
@@ -847,12 +1266,14 @@ class RelGeoMcpJsonRpcRouter {
                             _getSyntaxRuleTool,
                             _examplesTool,
                             ..._activeDocumentTools,
+                            if (activeBridge != null) _reviewProposedPatchTool,
                             if (allowDocumentEdits) _applyDocumentEditTool,
                           ])
                   : <Map<String, Object?>>[
                       ...toolDispatcher.listTools(),
                       if (exposeDesktopExamples) _examplesTool,
                       if (activeBridge != null) ..._activeDocumentTools,
+                      if (activeBridge != null) _reviewProposedPatchTool,
                       if (activeBridge != null && allowDocumentEdits)
                         _applyDocumentEditTool,
                     ],
@@ -882,15 +1303,20 @@ class RelGeoMcpJsonRpcRouter {
               'mode': allowDocumentEdits
                   ? 'desktop connected with document edits enabled'
                   : 'read-only desktop connection',
-              if (allowDocumentEdits)
-                'tools': <Map<String, String>>[
-                  ...(_capabilities['tools'] as List<Map<String, String>>),
+              'tools': <Map<String, String>>[
+                ...(_capabilities['tools'] as List<Map<String, String>>),
+                <String, String>{
+                  'name': 'relgeo_review_proposed_patch',
+                  'description':
+                      'Review one bounded patch without changing the active document.',
+                },
+                if (allowDocumentEdits)
                   <String, String>{
                     'name': 'relgeo_apply_document_edit',
                     'description':
                         'Apply one bounded, undoable patch to the active document.',
                   },
-                ],
+              ],
               'limitations': <String>[
                 ...(_capabilities['limitations'] as List<String>).where(
                   (item) => item != 'Cannot create or edit drawings.',
@@ -912,10 +1338,16 @@ class RelGeoMcpJsonRpcRouter {
               name == 'relgeo_get_examples' &&
               activeBridge != null) {
             output = _getDesktopExamples(params['arguments']);
+          } else if (name == 'relgeo_review_proposed_patch' &&
+              activeBridge != null) {
+            output = await _reviewDesktopDocumentEdit(params['arguments']);
           } else if (name == 'relgeo_apply_document_edit' &&
               activeBridge != null &&
               allowDocumentEdits) {
-            output = await _applyDesktopDocumentEdit(params['arguments']);
+            output = await _applyDesktopDocumentEdit(
+              params['arguments'],
+              cancellation: cancellation,
+            );
           } else if (name == 'relgeo_get_examples' &&
               activeBridge != null &&
               (toolDispatcher == null || toolDispatcher.handlers == null)) {
@@ -927,6 +1359,7 @@ class RelGeoMcpJsonRpcRouter {
               final toolNames = <Object?>[
                 ...(metadata['tools'] as List<Object?>),
                 'relgeo_get_examples',
+                'relgeo_review_proposed_patch',
                 if (allowDocumentEdits) 'relgeo_apply_document_edit',
               ];
               output = <String, Object?>{
@@ -985,6 +1418,7 @@ class RelGeoMcpJsonRpcRouter {
             }
             output = snapshot.toJson();
           }
+          cancellation?.throwIfCancelled();
           return _response(
             hasId,
             id,
@@ -1022,6 +1456,7 @@ class RelGeoMcpJsonRpcRouter {
             );
           }
           final content = await resources.read(uri);
+          cancellation?.throwIfCancelled();
           return _response(
             hasId,
             id,
@@ -1036,8 +1471,20 @@ class RelGeoMcpJsonRpcRouter {
             data: <String, Object?>{'method': method},
           );
       }
+    } on McpRequestCancelledException catch (error) {
+      return _response(
+        hasId,
+        id,
+        error: McpDispatchException(
+          -32800,
+          error.message,
+          data: <String, Object?>{'category': 'request-cancelled'},
+        ),
+      );
     } on McpDispatchException catch (error) {
       return _response(hasId, id, error: error);
+    } finally {
+      _cancellations.finish(id);
     }
   }
 
@@ -1054,6 +1501,58 @@ class RelGeoMcpJsonRpcRouter {
       },
     },
   ];
+
+  static const Map<String, Object?>
+  _reviewProposedPatchTool = <String, Object?>{
+    'name': 'relgeo_review_proposed_patch',
+    'description':
+        'Validate one bounded patch against the active document without changing it.',
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'additionalProperties': false,
+      'required': <String>[
+        'baseDocumentId',
+        'baseRevision',
+        'summary',
+        'edits',
+      ],
+      'properties': <String, Object?>{
+        'baseDocumentId': <String, Object?>{'type': 'string', 'minLength': 1},
+        'baseRevision': <String, Object?>{'type': 'integer', 'minimum': 0},
+        'summary': <String, Object?>{
+          'type': 'string',
+          'minLength': 1,
+          'maxLength': DocumentEditBounds.maxSummaryCodeUnits,
+        },
+        'rationale': <String, Object?>{'type': 'string'},
+        'edits': <String, Object?>{
+          'type': 'array',
+          'minItems': 1,
+          'maxItems': DocumentEditBounds.maxEdits,
+          'items': <String, Object?>{
+            'type': 'object',
+            'additionalProperties': false,
+            'required': <String>['range', 'replacement'],
+            'properties': <String, Object?>{
+              'range': <String, Object?>{
+                'type': 'object',
+                'additionalProperties': false,
+                'required': <String>['start', 'end'],
+                'properties': <String, Object?>{
+                  'start': <String, Object?>{'type': 'integer', 'minimum': 0},
+                  'end': <String, Object?>{'type': 'integer', 'minimum': 0},
+                },
+              },
+              'replacement': <String, Object?>{
+                'type': 'string',
+                'maxLength': DocumentEditBounds.maxReplacementCodeUnits,
+              },
+            },
+          },
+        },
+      },
+    },
+  };
 
   static const Map<String, Object?> _applyDocumentEditTool = <String, Object?>{
     'name': 'relgeo_apply_document_edit',
@@ -1391,20 +1890,18 @@ objects:
     ).toJson();
   }
 
-  Future<Map<String, Object?>> _applyDesktopDocumentEdit(
-    Object? rawArguments,
-  ) async {
-    final arguments = _desktopArguments(
-      rawArguments,
-      'relgeo_apply_document_edit',
-    );
+  DocumentEditProposal _parseDesktopDocumentEdit(
+    Object? rawArguments, {
+    String toolName = 'relgeo_review_proposed_patch',
+  }) {
+    final arguments = _desktopArguments(rawArguments, toolName);
     _rejectDesktopArguments(arguments, const <String>{
       'baseDocumentId',
       'baseRevision',
       'summary',
       'rationale',
       'edits',
-    }, 'relgeo_apply_document_edit');
+    }, toolName);
     final documentId = arguments['baseDocumentId'];
     if (documentId is! String || documentId.isEmpty) {
       throw const McpDispatchException(
@@ -1477,14 +1974,36 @@ objects:
         ),
       );
     }
-    final result = await activeBridge!.applyDocumentEdit(
-      DocumentEditProposal(
-        baseDocumentId: documentId,
-        baseRevision: revision,
-        summary: summary,
-        rationale: rationale as String?,
-        edits: edits,
-      ),
+    return DocumentEditProposal(
+      baseDocumentId: documentId,
+      baseRevision: revision,
+      summary: summary,
+      rationale: rationale as String?,
+      edits: edits,
+    );
+  }
+
+  Future<Map<String, Object?>> _reviewDesktopDocumentEdit(
+    Object? rawArguments,
+  ) async {
+    final proposal = _parseDesktopDocumentEdit(rawArguments);
+    final result = await activeBridge!.reviewDocumentEdit(proposal);
+    return result.toJson();
+  }
+
+  Future<Map<String, Object?>> _applyDesktopDocumentEdit(
+    Object? rawArguments, {
+    McpCancellationToken? cancellation,
+  }) async {
+    final proposal = _parseDesktopDocumentEdit(
+      rawArguments,
+      toolName: 'relgeo_apply_document_edit',
+    );
+    final token = cancellation ?? McpCancellationToken();
+    token.throwIfCancelled();
+    final result = await activeBridge!.applyDocumentEditGuarded(
+      proposal,
+      token,
     );
     return result.toJson();
   }
