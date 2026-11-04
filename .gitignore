@@ -1,4 +1,5 @@
 # Dart-generated tooling and build output
+.dart_tool/
 build/
 .packages
 .pub/
