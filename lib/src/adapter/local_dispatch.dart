@@ -565,13 +565,14 @@ class RelGeoMcpToolDispatcher {
           () => _requireHandlers(name).getExamples(examplesInput),
         );
         _guardExamples(examplesInput, examplesResult);
-        return examplesResult.toJson();
+        return _rankExamples(examplesInput, examplesResult).toJson();
       case 'relgeo_complete_source':
         final completeInput = _completeSource(rawArguments);
         final completeResult = await _invokeOwner(
           name,
           () => _requireHandlers(name).completeSource(completeInput),
         );
+        _guardCompletion(completeInput, completeResult);
         return completeResult
             .withIdentityIfMissing(completeInput.identity)
             .toJson();
@@ -610,6 +611,60 @@ class RelGeoMcpToolDispatcher {
     }
   }
 
+  static ExamplesResult _rankExamples(
+    GetExamplesInput input,
+    ExamplesResult result,
+  ) {
+    final ranked = List<ExampleResult>.of(result.examples);
+    final queryTerms = _exampleQueryTerms(input);
+    ranked.sort((left, right) {
+      final relevance = _exampleRelevance(
+        right,
+        queryTerms,
+      ).compareTo(_exampleRelevance(left, queryTerms));
+      if (relevance != 0) return relevance;
+
+      final size = left.source.length.compareTo(right.source.length);
+      if (size != 0) return size;
+
+      final title = left.title.compareTo(right.title);
+      if (title != 0) return title;
+      return left.exampleId.compareTo(right.exampleId);
+    });
+    return ExamplesResult(examples: List<ExampleResult>.unmodifiable(ranked));
+  }
+
+  static List<String> _exampleQueryTerms(GetExamplesInput input) {
+    final value = input.exampleId ?? input.query;
+    if (value == null) return const <String>[];
+    return value
+        .toLowerCase()
+        .split(RegExp(r'[^a-z0-9_]+'))
+        .where((term) => term.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+  }
+
+  static int _exampleRelevance(ExampleResult example, List<String> terms) {
+    if (terms.isEmpty) return 0;
+    final id = example.exampleId.toLowerCase();
+    final title = example.title.toLowerCase();
+    final description = example.description?.toLowerCase() ?? '';
+    final source = example.source.toLowerCase();
+    var score = 0;
+    for (final term in terms) {
+      if (id == term) {
+        score += 8;
+      } else if (id.contains(term)) {
+        score += 5;
+      }
+      if (title.contains(term)) score += 4;
+      if (description.contains(term)) score += 2;
+      if (source.contains(term)) score += 1;
+    }
+    return score;
+  }
+
   static void _guardExamples(GetExamplesInput input, ExamplesResult result) {
     if (result.examples.length > input.maxResults) {
       throw _ownerBoundsError(
@@ -628,6 +683,38 @@ class RelGeoMcpToolDispatcher {
     }
   }
 
+  static void _guardCompletion(
+    CompleteSourceInput input,
+    CompletionResult result,
+  ) {
+    if (result.items.length > input.maxResults) {
+      throw _ownerBoundsError(
+        'completeSource returned more than maxResults',
+        maximum: input.maxResults,
+      );
+    }
+    if (input.identity != null && result.identity != null) {
+      _guardLanguageServiceIdentity(input.identity!, result.identity!);
+    }
+    for (final item in result.items) {
+      if (item.label.isEmpty || item.insertText.isEmpty) {
+        throw _ownerContractError(
+          'completeSource returned a proposal without label or insertText',
+        );
+      }
+      if (item.label.length > McpReadOnlyBounds.maxCompletionLabelCodeUnits ||
+          item.insertText.length >
+              McpReadOnlyBounds.maxCompletionInsertTextCodeUnits ||
+          (item.documentation?.length ?? 0) >
+              McpReadOnlyBounds.maxCompletionDocumentationCodeUnits) {
+        throw _ownerBoundsError(
+          'completeSource returned oversized proposal content',
+          maximum: McpReadOnlyBounds.maxCompletionDocumentationCodeUnits,
+        );
+      }
+    }
+  }
+
   static void _guardValidation(
     ValidateSourceInput input,
     ValidationResult result,
@@ -642,6 +729,9 @@ class RelGeoMcpToolDispatcher {
       throw _ownerContractError(
         'validateSource returned a different specVersion',
       );
+    }
+    if (input.identity != null && result.identity != null) {
+      _guardLanguageServiceIdentity(input.identity!, result.identity!);
     }
     if (result.diagnostics.length > McpReadOnlyBounds.maxDiagnosticCount) {
       throw _ownerBoundsError(
@@ -698,6 +788,23 @@ class RelGeoMcpToolDispatcher {
     if (value.specVersion != specVersion || value.revision.isEmpty) {
       throw _ownerContractError(
         'owner result provenance does not match the requested spec revision',
+      );
+    }
+  }
+
+  static void _guardLanguageServiceIdentity(
+    McpLanguageServiceIdentity requested,
+    McpLanguageServiceIdentity returned,
+  ) {
+    if (requested.documentId != returned.documentId ||
+        requested.version != returned.version ||
+        requested.requestId != returned.requestId ||
+        requested.specVersion != returned.specVersion ||
+        requested.sourceRevision != returned.sourceRevision ||
+        requested.protocolVersion != returned.protocolVersion ||
+        requested.positionEncoding != returned.positionEncoding) {
+      throw _ownerContractError(
+        'owner result identity does not match the requested document context',
       );
     }
   }

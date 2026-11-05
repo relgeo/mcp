@@ -21,6 +21,7 @@ const _specSnapshot = SpecSnapshotMetadata(
 
 RelGeoMcpToolHandlers _handlers({
   GetExamplesHandler? getExamples,
+  CompleteSourceHandler? completeSource,
   ValidateSourceHandler? validateSource,
   RenderSourceHandler? renderSource,
 }) => RelGeoMcpToolHandlers(
@@ -59,7 +60,9 @@ RelGeoMcpToolHandlers _handlers({
           ),
         ],
       ),
-  completeSource: (_) => const CompletionResult(items: <CompletionProposal>[]),
+  completeSource:
+      completeSource ??
+      (_) => const CompletionResult(items: <CompletionProposal>[]),
   validateSource:
       validateSource ??
       (input) => ValidationResult(
@@ -378,6 +381,127 @@ Rect uses width and height.''',
       await expectLater(
         wrongRevision.call('relgeo_validate_source', <String, Object?>{
           'source': 'objects: {}',
+        }),
+        throwsA(
+          isA<McpDispatchException>()
+              .having((error) => error.code, 'code', -32005)
+              .having(
+                (error) => error.data?['category'],
+                'category',
+                'owner-contract',
+              ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'example retrieval ranks relevant minimal examples deterministically',
+    () async {
+      final dispatcher = RelGeoMcpToolDispatcher(
+        _handlers(
+          getExamples: (_) => const ExamplesResult(
+            examples: <ExampleResult>[
+              ExampleResult(
+                exampleId: 'rect-long',
+                title: 'Rectangle width',
+                source: 'rect width: 100 height: 100 color: blue',
+                provenance: _specProvenance,
+              ),
+              ExampleResult(
+                exampleId: 'generic',
+                title: 'Generic object',
+                source: 'object: {}',
+                provenance: _specProvenance,
+              ),
+              ExampleResult(
+                exampleId: 'rect-short',
+                title: 'Rectangle width',
+                source: 'rect width: 1',
+                provenance: _specProvenance,
+              ),
+            ],
+          ),
+        ),
+      );
+
+      final result = await dispatcher.call(
+        'relgeo_get_examples',
+        <String, Object?>{'query': 'rect width', 'maxResults': 3},
+      );
+      final examples = (result['examples']! as List)
+          .cast<Map<String, Object?>>();
+      expect(examples.map((example) => example['exampleId']), <Object?>[
+        'rect-short',
+        'rect-long',
+        'generic',
+      ]);
+    },
+  );
+
+  test(
+    'completion adapter rejects oversized or mismatched owner results',
+    () async {
+      final oversized = RelGeoMcpToolDispatcher(
+        _handlers(
+          completeSource: (input) => CompletionResult(
+            items: List<CompletionProposal>.generate(
+              input.maxResults + 1,
+              (index) => CompletionProposal(
+                label: 'item-$index',
+                insertText: 'item-$index',
+                kind: 'keyword',
+              ),
+            ),
+          ),
+        ),
+      );
+      await expectLater(
+        oversized.call('relgeo_complete_source', <String, Object?>{
+          'source': 'rect',
+          'position': <String, Object?>{'line': 0, 'character': 4},
+          'maxResults': 1,
+        }),
+        throwsA(
+          isA<McpDispatchException>()
+              .having((error) => error.code, 'code', -32005)
+              .having(
+                (error) => error.data?['category'],
+                'category',
+                'owner-bounds',
+              ),
+        ),
+      );
+
+      final mismatchedIdentity = RelGeoMcpToolDispatcher(
+        _handlers(
+          completeSource: (_) => const CompletionResult(
+            items: <CompletionProposal>[
+              CompletionProposal(
+                label: 'rect',
+                insertText: 'rect',
+                kind: 'keyword',
+              ),
+            ],
+            identity: McpLanguageServiceIdentity(
+              documentId: 'other-document',
+              version: 7,
+              requestId: 'other-request',
+              specVersion: '0.5',
+            ),
+          ),
+        ),
+      );
+      await expectLater(
+        mismatchedIdentity.call('relgeo_complete_source', <String, Object?>{
+          'source': 'rect',
+          'position': <String, Object?>{'line': 0, 'character': 4},
+          'identity': <String, Object?>{
+            'documentId': 'active-document',
+            'version': 3,
+            'requestId': 'request-1',
+            'specVersion': '0.5',
+          },
         }),
         throwsA(
           isA<McpDispatchException>()

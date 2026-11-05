@@ -12,6 +12,9 @@ class McpReadOnlyBounds {
   static const int maxSourceCodeUnits = 1024 * 1024;
   static const int maxDiagnosticCount = 100;
   static const int maxExampleSourceCodeUnits = 64 * 1024;
+  static const int maxCompletionLabelCodeUnits = 512;
+  static const int maxCompletionInsertTextCodeUnits = 8 * 1024;
+  static const int maxCompletionDocumentationCodeUnits = 64 * 1024;
   static const int maxRenderedCodeUnits = 4 * 1024 * 1024;
 }
 
